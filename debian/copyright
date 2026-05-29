@@ -1,0 +1,185 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: redmine-mcp-server
+Upstream-Contact: <preferred name and address to reach the upstream project>
+Source: <url://example.com>
+#
+# Please double check copyright with the licensecheck(1) command.
+
+Files:     .env.docker.example
+           .env.example
+           .flake8
+           .github/ISSUE_TEMPLATE/bug_report.yml
+           .github/ISSUE_TEMPLATE/feature_request.yml
+           .github/dependabot.yml
+           .github/workflows/dependency-audit.yml
+           .github/workflows/lock-closed-issues.yml
+           .github/workflows/pr-tests.yml
+           .github/workflows/publish-pypi.yml
+           .github/workflows/remove-autoclose-label.yml
+           .github/workflows/stale-issue-manager.yml
+           .gitignore
+           .pre-commit-config.yaml
+           .python-version
+           CHANGELOG.md
+           Dockerfile
+           README.md
+           codecov.yml
+           deploy.sh
+           docker-compose.yml
+           docs/oauth-setup.md
+           docs/roadmap.md
+           docs/tool-reference.md
+           docs/troubleshooting.md
+           pyproject.toml
+           pytest.ini
+           scripts/audit.sh
+           scripts/release.py
+           server.json
+           src/redmine_mcp_server/__init__.py
+           src/redmine_mcp_server/_auth.py
+           src/redmine_mcp_server/_cleanup.py
+           src/redmine_mcp_server/_client.py
+           src/redmine_mcp_server/_custom_fields.py
+           src/redmine_mcp_server/_decorators.py
+           src/redmine_mcp_server/_env.py
+           src/redmine_mcp_server/_errors.py
+           src/redmine_mcp_server/_http_routes.py
+           src/redmine_mcp_server/_serialization.py
+           src/redmine_mcp_server/_ssrf.py
+           src/redmine_mcp_server/_tool_error_middleware.py
+           src/redmine_mcp_server/_validation.py
+           src/redmine_mcp_server/file_manager.py
+           src/redmine_mcp_server/main.py
+           src/redmine_mcp_server/oauth_scopes.py
+           src/redmine_mcp_server/server.py
+           src/redmine_mcp_server/tools/__init__.py
+           src/redmine_mcp_server/tools/checklists.py
+           src/redmine_mcp_server/tools/contacts.py
+           src/redmine_mcp_server/tools/enumeration.py
+           src/redmine_mcp_server/tools/files.py
+           src/redmine_mcp_server/tools/gantt.py
+           src/redmine_mcp_server/tools/issues.py
+           src/redmine_mcp_server/tools/meta.py
+           src/redmine_mcp_server/tools/products.py
+           src/redmine_mcp_server/tools/projects.py
+           src/redmine_mcp_server/tools/search.py
+           src/redmine_mcp_server/tools/time_tracking.py
+           src/redmine_mcp_server/tools/wiki.py
+           tests/__init__.py
+           tests/conftest.py
+           tests/fixtures/redmine_6_permissions.txt
+           tests/fixtures/ssl/.gitignore
+           tests/fixtures/ssl/generate-test-certs.sh
+           tests/run_tests.py
+           tests/test_admin_tools_gating.py
+           tests/test_agile_support.py
+           tests/test_attachment_shape_symmetry.py
+           tests/test_auth_factory.py
+           tests/test_checklist_support.py
+           tests/test_cleanup_manager.py
+           tests/test_client_token_access.py
+           tests/test_connection.py
+           tests/test_content_url_rewriting.py
+           tests/test_create_name_lookup.py
+           tests/test_crm_support.py
+           tests/test_custom_field_helpers.py
+           tests/test_decorators.py
+           tests/test_delete_redmine_issue.py
+           tests/test_dmsf_support.py
+           tests/test_enumeration_tools.py
+           tests/test_enumerations.py
+           tests/test_env_loading.py
+           tests/test_error_handling.py
+           tests/test_file_manager.py
+           tests/test_file_tools.py
+           tests/test_gantt.py
+           tests/test_global_search.py
+           tests/test_health_probe.py
+           tests/test_http_endpoints.py
+           tests/test_integration.py
+           tests/test_issue_to_dict_selective.py
+           tests/test_issue_tracking_tools.py
+           tests/test_limit_offset_schema.py
+           tests/test_list_error_envelope_consolidation.py
+           tests/test_list_project_issue_custom_fields.py
+           tests/test_list_redmine_issues.py
+           tests/test_list_redmine_versions.py
+           tests/test_main.py
+           tests/test_manage_action_schema.py
+           tests/test_manage_redmine_version.py
+           tests/test_oauth_auth.py
+           tests/test_oauth_discovery.py
+           tests/test_oauth_integration.py
+           tests/test_oauth_scopes.py
+           tests/test_products_support.py
+           tests/test_project_members.py
+           tests/test_project_tools.py
+           tests/test_prompt_injection.py
+           tests/test_read_only_mode.py
+           tests/test_redmine_handler.py
+           tests/test_release_script.py
+           tests/test_required_field_hint.py
+           tests/test_safe_isoformat.py
+           tests/test_search_field_selection.py
+           tests/test_search_hydration.py
+           tests/test_search_native_filters.py
+           tests/test_search_pagination.py
+           tests/test_security_hardening.py
+           tests/test_security_validation.py
+           tests/test_server_info.py
+           tests/test_ssl_configuration.py
+           tests/test_ssl_integration.py
+           tests/test_time_entries.py
+           tests/test_time_tracking_tools.py
+           tests/test_tool_error_middleware.py
+           tests/test_user_id_typing_schema.py
+           tests/test_wiki_editing.py
+           tests/test_wiki_management.py
+           tests/test_wrap_policy.py
+           uv.lock
+Copyright: __NO_COPYRIGHT_NOR_LICENSE__
+License:   __NO_COPYRIGHT_NOR_LICENSE__
+
+Files:     docs/contributing.md
+Copyright: __NO_COPYRIGHT__ in: docs/contributing.md
+License:   __UNKNOWN__
+ 1. Update version in `pyproject.toml`
+ 2. Update `CHANGELOG.md`
+ 3. Update `server.json`
+ 4. Create git tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
+ 5. Push tag: `git push origin vX.Y.Z`
+ 6. GitHub Actions automatically publishes to PyPI
+ 7. Create GitHub Release with notes
+
+Files:     src/redmine_mcp_server/tools/documents.py
+Copyright: __NO_COPYRIGHT__ in: src/redmine_mcp_server/tools/documents.py
+License:   __UNKNOWN__
+ ``{"id", "name"}`` dict or ``None``. Display names are returned
+
+#----------------------------------------------------------------------------
+# Files marked as NO_LICENSE_TEXT_FOUND may be covered by the following
+# license/copyright files.
+
+#----------------------------------------------------------------------------
+# License file: LICENSE
+ MIT License
+ .
+ Copyright (c) 2025 Kevin Tan and contributors
+ .
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.

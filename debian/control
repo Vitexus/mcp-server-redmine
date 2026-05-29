@@ -1,0 +1,37 @@
+Source: redmine-mcp-server
+Section: python
+Priority: optional
+Maintainer: Vítězslav Dvořák <info@vitexsoftware.cz>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-hatchling,
+Standards-Version: 4.7.0
+Homepage: https://github.com/jztan/redmine-mcp-server
+Rules-Requires-Root: no
+Vcs-Git: https://github.com/Vitexus/redmine-mcp-server.git
+Vcs-Browser: https://github.com/Vitexus/redmine-mcp-server
+
+Package: redmine-mcp-server
+Architecture: all
+Multi-Arch: foreign
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+ python3 (>= 3.10),
+ python3-dotenv,
+ python3-fastapi,
+ python3-httpx,
+ python3-fastmcp,
+ python3-redmine,
+ uvicorn,
+ python3-multipart,
+ python3-urllib3,
+Description: MCP server for Redmine project management
+ Production-ready Model Context Protocol (MCP) server that connects
+ AI assistants to Redmine issue tracking and project management.
+ .
+ Exposes a /mcp endpoint (default port 8000) with authentication,
+ pagination, file management, and enterprise security features.

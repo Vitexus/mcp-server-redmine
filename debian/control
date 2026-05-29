@@ -31,6 +31,7 @@ Depends:
  python3-multipart,
  python3-urllib3,
  python3-importlib-metadata,
+ python3-cachetools,
 Description: MCP server for Redmine project management
  Production-ready Model Context Protocol (MCP) server that connects
  AI assistants to Redmine issue tracking and project management.

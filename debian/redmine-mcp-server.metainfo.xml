@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="console-application">
+  <id>io.github.jztan.redmine-mcp-server</id>
+  <name>Redmine MCP Server</name>
+  <summary>Production-ready MCP server for Redmine project management</summary>
+  <description>
+    <p>A production-ready Model Context Protocol (MCP) server that connects AI assistants
+    to Redmine issue tracking and project management systems.</p>
+    <p>Exposes a /mcp endpoint (default port 8000) with support for authentication,
+    pagination, file management, and enterprise security features.</p>
+  </description>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <icon type="stock">redmine-mcp-server</icon>
+  <url type="homepage">https://github.com/jztan/redmine-mcp-server</url>
+  <developer>
+    <id>io.github.jztan</id>
+    <name>Kevin Tan</name>
+  </developer>
+  <provides>
+    <binary>redmine-mcp-server</binary>
+  </provides>
+  <releases>
+    <release version="2.0.1" date="2026-05-22"/>
+  </releases>
+  <categories>
+    <category>ConsoleOnly</category>
+    <category>Utility</category>
+  </categories>
+</component>

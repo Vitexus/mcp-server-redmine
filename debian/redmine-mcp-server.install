@@ -1,31 +1,3 @@
-src/redmine_mcp_server/_custom_fields.py
-src/redmine_mcp_server/_cleanup.py
-src/redmine_mcp_server/tools/search.py
-src/redmine_mcp_server/tools/wiki.py
-src/redmine_mcp_server/tools/documents.py
-src/redmine_mcp_server/tools/__init__.py
-src/redmine_mcp_server/tools/checklists.py
-src/redmine_mcp_server/tools/contacts.py
-src/redmine_mcp_server/tools/projects.py
-src/redmine_mcp_server/tools/meta.py
-src/redmine_mcp_server/tools/products.py
-src/redmine_mcp_server/tools/files.py
-src/redmine_mcp_server/tools/time_tracking.py
-src/redmine_mcp_server/tools/issues.py
-src/redmine_mcp_server/tools/enumeration.py
-src/redmine_mcp_server/tools/gantt.py
-src/redmine_mcp_server/__init__.py
-src/redmine_mcp_server/_http_routes.py
-src/redmine_mcp_server/_ssrf.py
-src/redmine_mcp_server/server.py
-src/redmine_mcp_server/_tool_error_middleware.py
-src/redmine_mcp_server/_client.py
-src/redmine_mcp_server/_decorators.py
-src/redmine_mcp_server/main.py
-src/redmine_mcp_server/_validation.py
-src/redmine_mcp_server/_serialization.py
-src/redmine_mcp_server/file_manager.py
-src/redmine_mcp_server/_errors.py
-src/redmine_mcp_server/_auth.py
-src/redmine_mcp_server/oauth_scopes.py
-src/redmine_mcp_server/_env.py
+# Python files are installed by pybuild
+debian/redmine-mcp-server.metainfo.xml usr/share/metainfo/
+debian/redmine-mcp-server.svg usr/share/icons/hicolor/scalable/apps/

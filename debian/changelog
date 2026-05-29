@@ -1,5 +1,14 @@
-redmine-mcp-server (2.0.1) UNRELEASED; urgency=low
+redmine-mcp-server (2.0.1.1) trixie; urgency=low
 
+  [ Vítězslav Dvořák ]
   * Initial Debian packaging
 
- -- Vítězslav Dvořák <info@vitexsoftware.cz>  Fri, 29 May 2026 10:21:55 +0200
+  [ vitex ]
+  * feat: expose current_user in get_mcp_server_info to identify who
+    "me" resolves to
+  * fix: health endpoint probes Redmine connectivity in legacy mode via
+    /users/current.json
+  * fix: compatible with Redmine 3.x and later (use /users/current.json,
+    not /my/account.json)
+
+ -- vitex <info@vitexsoftware.cz>  Fri, 29 May 2026 18:29:03 +0200

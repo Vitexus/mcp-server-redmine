@@ -8,6 +8,7 @@ Build-Depends:
  pybuild-plugin-pyproject,
  python3-all,
  python3-hatchling,
+ python3-pip,
 Standards-Version: 4.7.0
 Homepage: https://github.com/jztan/redmine-mcp-server
 Rules-Requires-Root: no
@@ -15,7 +16,7 @@ Vcs-Git: https://github.com/Vitexus/redmine-mcp-server.git
 Vcs-Browser: https://github.com/Vitexus/redmine-mcp-server
 
 Package: redmine-mcp-server
-Architecture: all
+Architecture: any
 Multi-Arch: foreign
 Depends:
  ${misc:Depends},
@@ -35,3 +36,7 @@ Description: MCP server for Redmine project management
  .
  Exposes a /mcp endpoint (default port 8000) with authentication,
  pagination, file management, and enterprise security features.
+ .
+ A compatible pydantic-core is bundled privately in
+ /usr/lib/redmine-mcp-server/ and activated via the launcher's
+ PYTHONPATH so no system packages are modified.

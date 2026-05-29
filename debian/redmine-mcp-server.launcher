@@ -1,0 +1,6 @@
+#!/bin/bash
+# Prepend the bundled pydantic-core so it shadows any incompatible
+# system-installed version (e.g. python3-pydantic-core 2.27.2 from Debian).
+# No system packages are modified.
+exec env PYTHONPATH="/usr/lib/redmine-mcp-server${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m redmine_mcp_server.main "$@"

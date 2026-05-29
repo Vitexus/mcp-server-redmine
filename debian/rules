@@ -1,9 +1,30 @@
 #!/usr/bin/make -f
 
 export PYBUILD_NAME=redmine-mcp-server
+PYDANTIC_CORE_VER := 2.46.3
 
 %:
 	dh $@ --with python3 --buildsystem=pybuild
 
 override_dh_auto_test:
 	# Skip tests - test dependencies not packaged
+
+override_dh_auto_install:
+	dh_auto_install
+	# Bundle a private pydantic-core so the system version (2.27.2) is not used.
+	# The PYTHONPATH wrapper prepends this at runtime — no system packages affected.
+	install -d debian/redmine-mcp-server/usr/lib/redmine-mcp-server/
+	pip3 download --no-deps "pydantic-core==$(PYDANTIC_CORE_VER)" \
+		-d /tmp/rms-pydantic-core
+	python3 -m zipfile -e \
+		$$(ls /tmp/rms-pydantic-core/pydantic_core-$(PYDANTIC_CORE_VER)-*.whl | head -1) \
+		/tmp/rms-pydantic-core-src/
+	cp -r /tmp/rms-pydantic-core-src/pydantic_core \
+		debian/redmine-mcp-server/usr/lib/redmine-mcp-server/
+	# Replace the pybuild-generated launcher with our PYTHONPATH wrapper
+	install -m 755 debian/redmine-mcp-server.launcher \
+		debian/redmine-mcp-server/usr/bin/redmine-mcp-server
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -rf /tmp/rms-pydantic-core /tmp/rms-pydantic-core-src || true

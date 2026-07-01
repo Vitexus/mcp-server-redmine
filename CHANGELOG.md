@@ -8,6 +8,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `create_redmine_issue` and `update_redmine_issue` now accept an `uploads`
+  parameter to attach files to an issue (and to a journal note when combined
+  with `notes`), resolving each file from `content_base64`, `source_url`, or a
+  new on-disk `file_path` source.
+- `upload_file` gains a `file_path` source for files already on the server.
+- New `REDMINE_MCP_UPLOAD_FILE_ROOTS` setting to allowlist `file_path` upload
+  directories (defaults to `ATTACHMENTS_DIR`).
+- `legacy-per-user` auth mode: per-request Redmine API key via an
+  `X-Redmine-API-Key` header, for Redmine instances too old for OAuth. Opt-in
+  and fail-closed (`REDMINE_PER_USER_TRUST_PROXY` required); keys are redacted
+  from logs; optional identity audit via `REDMINE_PER_USER_AUDIT_IDENTITY`.
+- `tracker` field in issue serialization and the `fields` selector for issue listing/search tools.
+- `list_project_trackers` tool for project-scoped tracker discovery.
+- `create_checklist_item` tool (RedmineUP Checklists) and `is_section` in checklist output.
+
+## [2.4.0] - 2026-06-27
+### Added
+- Promotional demo page under `pages/`, deployed to GitHub Pages on version tags via a new `deploy-demo.yml` workflow. It is a scripted, client-side walkthrough of an AI agent triaging a sample Redmine sprint backlog (list, read, reassign, comment, log time, close), with tool-call request/response JSON that matches the server's real response shapes, a Kanban board that updates as the agent works, and a light/dark theme toggle. No live Redmine is connected.
+
+### Fixed
+- `get_redmine_issue` now returns journal field-change `details` (status, assignee, custom-field edits) and no longer drops journals that have no note text. The `_journals_to_list` helper previously skipped any journal whose `notes` was empty via `if not notes: continue` and never serialized the `details` array, so field-only history was lost and `details` was missing even on journals with notes. Journals are now kept when they have a note **or** field-change details, and each entry includes `details` (`property`, `name`, `old_value`, `new_value`) plus `private_notes`. `get_private_notes` exposes `details` as well. ([#161](https://github.com/jztan/redmine-mcp-server/issues/161))
+
+### Security
+- Add a direct `joserfc>=1.6.7,<2` floor to clear CVE-2026-48990 (CWE-400 uncontrolled resource consumption). `joserfc` 1.3.4 through 1.6.5 fails to apply `JWSRegistry.max_payload_length` to RFC 7797 unencoded (`b64=false`) JWS payloads, allowing oversized payloads to be deserialized; the fix landed in 1.6.6. `joserfc` is a transitive dependency via `authlib` and `fastmcp`, so the direct floor ensures the fix reaches PyPI installs, not only the pinned lockfile. The lock now resolves `joserfc` 1.7.1.
+- Free-form journal field-change values now receive the same prompt-injection wrapping as journal notes. Custom-field values (`cf`), `description`/`subject` edits, and attachment filenames in `details` are wrapped in `<insecure-content-{boundary}>` tags, so the newly surfaced field-change history cannot smuggle injected instructions past an LLM consumer. Structured values (status, assignee, priority IDs, dates, numbers) are left raw to avoid bloating output with boundary tags. ([#161](https://github.com/jztan/redmine-mcp-server/issues/161))
+
+### Tests
+- `test_scope_advertising_subset_of_sandbox_scopes` now asserts the introspected test token is active before checking scope overlap. A stale `REDMINE_OAUTH_TEST_TOKEN` introspects with an empty scope, which previously made the test fail with a misleading "name drift between oauth_scopes.py and live Doorkeeper config" message; the active-token guard surfaces the real cause (re-mint the bearer) instead.
+
+### Contributors
+- @martindglaser — fix missing journal field-change details in `get_redmine_issue` ([#163](https://github.com/jztan/redmine-mcp-server/pull/163))
+
+## [2.3.1] - 2026-06-20
+### Security
+- Bump `python-multipart` 0.0.29 to 0.0.32 to clear CVE-2026-53539 and CVE-2026-53538 (both fixed upstream in 0.0.30). The direct floor in `pyproject.toml` is also raised from `>=0.0.27` to `>=0.0.30` so the fix reaches PyPI installs, not only the pinned lockfile. ([#150](https://github.com/jztan/redmine-mcp-server/pull/150))
+- Bump `starlette` 1.0.1 to 1.3.1 to clear four advisories: CVE-2026-48818 and CVE-2026-48817 (fixed in 1.1.0), CVE-2026-54282 (1.3.0), and CVE-2026-54283 (1.3.1). `starlette` is now also a declared direct dependency (the server imports it directly) with a `>=1.3.1` floor, so PyPI installs cannot resolve a vulnerable version. Dependabot does not propose transitive bumps on its own, so this was applied manually. ([#162](https://github.com/jztan/redmine-mcp-server/pull/162))
+- Bump `cryptography` 46.0.7 to 49.0.0 to clear GHSA-537c-gmf6-5ccf (fixed in 48.0.1). `cryptography` is a transitive dependency via `authlib` and `joserfc`; a direct `>=48.0.1` floor is added to `pyproject.toml` so the fix reaches PyPI installs. ([#162](https://github.com/jztan/redmine-mcp-server/pull/162))
+
+### Changed
+- Remove the unused `fastapi[standard]` dependency. The server is built directly on Starlette, FastMCP, and Uvicorn and never imported FastAPI, so dropping it removes a large unused transitive tree (`typer`, `sentry-sdk`, `jinja2`, `uvloop`, `fastapi-cli`, `orjson`, `ujson`, and others) from installs. `starlette` is now declared directly to keep the dependency it actually uses explicit. The PyPI `Changelog` project URL now points at the `develop` branch instead of a stale `master` path.
+- Rewrite the package description to state what the server does ("MCP server that lets AI assistants manage Redmine issues, projects, wikis, and time tracking") instead of marketing adjectives, applied consistently across `pyproject.toml`, `server.json`, and the GitHub repository description.
+- Update PyPI trove classifiers to match the project's status: `Development Status` moves from `4 - Beta` to `5 - Production/Stable`, and `Python :: 3 :: Only`, `Bug Tracking`, `System Administrators`, `OS Independent`, and `Web Environment` classifiers are added for accuracy and discoverability.
+- Bump runtime dependencies `fastmcp` 3.3.1 to 3.4.2 ([#152](https://github.com/jztan/redmine-mcp-server/pull/152)) and `uvicorn` 0.48.0 to 0.49.0, which pulls `httptools` 0.8.0 ([#151](https://github.com/jztan/redmine-mcp-server/pull/151)). The OAuth discovery and introspection paths were smoke-tested under FastMCP 3.4.2.
+- Bump development and CI tooling: `pytest` 9.0.3 to 9.1.1 ([#160](https://github.com/jztan/redmine-mcp-server/pull/160)), `pytest-asyncio` 1.3.0 to 1.4.0 ([#143](https://github.com/jztan/redmine-mcp-server/pull/143)), `actions/checkout` to 6.0.3 ([#142](https://github.com/jztan/redmine-mcp-server/pull/142)), `astral-sh/setup-uv` to 8.2.0 ([#149](https://github.com/jztan/redmine-mcp-server/pull/149)), and `codecov/codecov-action` 6.0.1 to 7.0.0 ([#148](https://github.com/jztan/redmine-mcp-server/pull/148)).
+
+## [2.3.0] - 2026-06-12
+### Added
+- New opt-in authentication mode `REDMINE_AUTH_MODE=oauth-proxy`, backed by FastMCP's `OAuthProxy`. In this mode the MCP server is the OAuth authorization server that MCP clients talk to (serving Dynamic Client Registration plus `/authorize`, `/token`, and `/register`) and proxies the upstream flow to Redmine/Doorkeeper, keeping user consent on Redmine via `require_authorization_consent="external"`. This supports clients that require DCR or CIMD without Redmine having to serve RFC 8414 metadata or implement DCR, which the existing `oauth` (introspection) mode could not provide on split-host deployments. The existing remote-auth setup is refactored into a `RedmineAuthProvider`, `/health` now probes Redmine introspection in both `oauth` and `oauth-proxy` modes, and the app supports mounting behind a public base path via `REDMINE_MCP_BASE_URL`. Token validation continues to use Doorkeeper introspection, and secrets may be supplied via `*_FILE` env vars for Docker/Kubernetes. Legacy and `oauth` modes are unchanged and `legacy` remains the default; the new mode also requires a stable `REDMINE_MCP_JWT_SIGNING_KEY`. See [`docs/oauth-setup.md`](docs/oauth-setup.md) for setup. ([#153](https://github.com/jztan/redmine-mcp-server/pull/153))
+- `oauth-proxy` mode restricts client redirect URIs to loopback by default (`http://localhost:*`, `http://127.0.0.1:*`). Since MCP clients register their own redirect URI via DCR, this prevents a registered client from pointing the flow at a remote target out of the box. Set `REDMINE_MCP_ALLOWED_CLIENT_REDIRECT_URIS` to a comma- or space-separated list of glob patterns for hosted clients, or `*` to accept any redirect URI. `docs/oauth-setup.md` also documents that OAuthProxy state is stored node-locally, so the mode is single-replica / sticky-session unless a shared `client_storage` backend is configured.
+
+### Changed
+- Secret `*_FILE` env vars (for example `REDMINE_MCP_JWT_SIGNING_KEY_FILE`) now raise a clear error naming the variable and path when the referenced file cannot be read, instead of surfacing a bare `FileNotFoundError`. `docs/oauth-setup.md` also notes that when the upstream `oauth-proxy` client falls back to the introspection client, that client must have the authorization code grant and the `/auth/callback` redirect URI configured.
+
+### Fixed
+- `python tests/run_tests.py --all` now actually runs the integration suite. The test hermeticity guard introduced in 2.2.0 blanks `REDMINE_*` environment variables for any run that is not an explicit `-m integration` invocation, so the single unmarked `--all` command was treated as a unit run and silently skipped every integration test. `--all` now runs the unit phase (`-m "not integration"`) and the integration phase (`-m integration`) as two separate pytest processes so each gets the correct environment; integration coverage is appended. ([#156](https://github.com/jztan/redmine-mcp-server/pull/156))
+
+### Documentation
+- `docs/oauth-setup.md` Step 4 now shows the correct authorization-server metadata path per mode. In `oauth-proxy` mode the issuer is `REDMINE_MCP_BASE_URL`, so RFC 8414 metadata is served at the root `/.well-known/oauth-authorization-server`; the `/mcp`-suffixed path used by `oauth` mode 404s there and previously read as a failure during verification. ([#140](https://github.com/jztan/redmine-mcp-server/issues/140))
+
+### Contributors
+- @aadnehovda, designed and implemented the `oauth-proxy` authentication mode backed by FastMCP `OAuthProxy`, and refactored the remote OAuth setup into `RedmineAuthProvider` ([#153](https://github.com/jztan/redmine-mcp-server/pull/153))
+- @timcomport, verified the `oauth-proxy` mode end to end on a split-host VS Code + Redmine 6.1.1 deployment and caught the Step 4 authorization-server metadata path discrepancy ([#140](https://github.com/jztan/redmine-mcp-server/issues/140))
+
+## [2.2.0] - 2026-06-06
+### Security
+- Pin `pyjwt[crypto]>=2.13.0,<3` to pull the fix for four advisories in 2.12.1: SSRF via `PyJWKClient` non-HTTP URL handlers (CVE-2026-48522), unbounded JWKS fetches driven by an unverified `kid` header (CVE-2026-48524), incorrect detached-JWS (`b64:false`) payload decoding (CVE-2026-48525), and HMAC/asymmetric algorithm confusion where an issuer public key is accepted as the HMAC secret (CVE-2026-48526). `pyjwt` is a transitive dependency via `mcp`, so it had no direct floor before this. Verified the 2.13.0 release is published by pyjwt maintainer Jose Padilla.
+
+### Added
+- `get_mcp_server_info` now returns `current_user` (`{id, login, name}`) for the authenticated Redmine user, or `null` when Redmine is unreachable. This lets a caller see who `assigned_to_id="me"` resolves to, which matters when a shared or robot API key is in use and `"me"` is not the human operator. The `list_redmine_issues` `assigned_to_id` docs now point to `get_mcp_server_info` when `"me"` queries return unexpectedly empty. ([#139](https://github.com/jztan/redmine-mcp-server/pull/139))
+- `/health` in legacy mode now probes `GET /users/current.json` to verify the configured credentials and reports the result under `checks.redmine`: `"ok"` when accepted, `"unreachable"` with `status: "degraded"` on auth failure, and `"unconfigured"` with `status: "ok"` when no URL or credentials are set. Auth misconfiguration now surfaces at the health check instead of only on the first failed tool call. The response stays HTTP 200 so orchestrators keep treating it as a binary liveness probe. ([#139](https://github.com/jztan/redmine-mcp-server/pull/139))
+- Docker images are now built and published to the GitHub Container Registry (`ghcr.io/jztan/redmine-mcp-server`) on each release. The release workflow builds multi-architecture images (`linux/amd64`, `linux/arm64`) and applies the version tags only after the matching PyPI wheel publishes, so a release never produces an image without its wheel. Pull `:latest`, a pinned `:X.Y.Z`, or a minor series `:X.Y`. Requested by @Bricklou ([#141](https://github.com/jztan/redmine-mcp-server/issues/141)).
+
+### Fixed
+- `create_redmine_issue` no longer returns the bare `"Requested resource not found."` message when the create request gets an HTTP 404. A 404 on a create POST is anomalous: it generally comes from the deployment or from Redmine itself rather than a genuinely missing resource (for example a sub-URI/Passenger deployment, a reverse proxy, or a plugin or controller filter on the create path), so Redmine can process the POST and create the issue while the client still sees a 404. The bare message invited blind retries and risked silent duplicate issues. The tool now returns a message explaining the issue may have been created and advising the caller to check Redmine before retrying. ([#146](https://github.com/jztan/redmine-mcp-server/issues/146))
+- `scripts/release.py` now recognizes comma-separated contributor entries (`- @user, did X`) when building the GitHub release notes. The author-parsing regex previously accepted only colon, hyphen, en dash, and em dash separators, so comma-style entries failed to parse and the generated `## Acknowledgements` block came out empty. This silently dropped the Contributors credits from the v2.0.1 and v2.1.0 GitHub releases (the CHANGELOG entries themselves were unaffected); both releases have been backfilled.
+- OAuth mode: the `/.well-known/oauth-authorization-server/mcp` discovery document now reports `issuer` as the Redmine URL instead of the MCP server's own base URL. On a split-host deployment (`REDMINE_URL` and `REDMINE_MCP_BASE_URL` on different hosts), the previous `issuer` disagreed with `authorization_servers` in the protected-resource document, so a spec-strict client (e.g. VS Code 1.122.1) treated the MCP server as the authorization server and requested `/authorize` on the MCP host, which 404s. The issuer now matches `authorization_servers` and the endpoint URLs, all naming Redmine, per RFC 8414 §3.3. ([#140](https://github.com/jztan/redmine-mcp-server/issues/140))
+
+### Contributors
+- @Vitexus, exposed `current_user` in `get_mcp_server_info` and added the legacy-mode Redmine probe to `/health` ([#139](https://github.com/jztan/redmine-mcp-server/pull/139))
+- @Bricklou, requested publishing the Docker image to the GitHub Container Registry ([#141](https://github.com/jztan/redmine-mcp-server/issues/141))
+- @timcomport, reported and diagnosed the OAuth discovery issuer mismatch on split-host deployments ([#140](https://github.com/jztan/redmine-mcp-server/issues/140))
+
+## [2.1.0] - 2026-05-29
 ### Security
 - Bump `starlette` 1.0.0 to 1.0.1 to fix PYSEC-2026-161 (malformed `Host` header handling)
 
@@ -857,6 +941,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive authentication support (username/password and API key)
 - Docker containerization support
 
+[2.4.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.4.0
+[2.3.1]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.3.1
+[2.3.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.3.0
+[2.2.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.2.0
+[2.1.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.1.0
 [2.0.1]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.0.1
 [2.0.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.0.0
 [1.3.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v1.3.0

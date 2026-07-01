@@ -93,7 +93,7 @@ async def _probe_introspection() -> tuple[str, Optional[str]]:
 async def _probe_redmine_legacy() -> tuple[str, str | None]:
     """Check Redmine connectivity for legacy (API key / password) auth mode.
 
-    Calls ``GET /my/account.json`` using the configured credentials.
+    Calls ``GET /users/current.json`` using the configured credentials.
 
     Returns:
         ``("ok", None)`` — credentials valid and Redmine reachable.
@@ -143,15 +143,42 @@ async def _probe_redmine_legacy() -> tuple[str, str | None]:
         return "unreachable", reason
 
 
+async def _probe_redmine_reachable() -> tuple[str, str | None]:
+    """Reachability-only probe for legacy-per-user mode.
+
+    There is no shared credential to authenticate with, so this only confirms
+    the Redmine URL answers. Any HTTP response (even 401/403) means reachable.
+    """
+    from ._client import REDMINE_URL
+
+    if not REDMINE_URL:
+        return "unconfigured", "REDMINE_URL not set"
+    url = REDMINE_URL.rstrip("/") + "/users/current.json"
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.get(url)
+        return "reachable_unauthenticated", None
+    except httpx.RequestError as exc:
+        reason = type(exc).__name__
+        logger.warning("per_user_redmine_probe_failure error=%s url=%s", reason, url)
+        return "unreachable", reason
+
+
 async def health_check(request):
     """Health check endpoint for container orchestration and monitoring.
 
-    In OAuth mode, also probes Doorkeeper's ``/oauth/introspect`` to surface
-    upstream availability that was lost in the 503->401 collapse when
-    FastMCP native auth replaced the bespoke middleware.
+    In OAuth and OAuth proxy modes, also probes Doorkeeper's
+    ``/oauth/introspect`` to surface upstream availability that was lost in
+    the 503->401 collapse when FastMCP native auth replaced the bespoke
+    middleware.
 
-    In legacy mode, probes ``GET /my/account.json`` to verify the configured
+    In legacy mode, probes ``GET /users/current.json`` to verify the configured
     API key (or username/password) is accepted by Redmine.
+
+    In legacy-per-user mode there is no shared credential, so it probes
+    ``GET /users/current.json`` unauthenticated to confirm URL reachability
+    only. Any HTTP response (including 401 or 403) counts as reachable; only
+    transport failures degrade status.
 
     Returns HTTP 200 in both healthy and degraded states so container
     orchestrators continue treating the endpoint as a binary liveness
@@ -172,13 +199,21 @@ async def health_check(request):
         "auth_mode": REDMINE_AUTH_MODE,
     }
 
-    if REDMINE_AUTH_MODE == "oauth":
+    if REDMINE_AUTH_MODE in {"oauth", "oauth-proxy"}:
         probe_status, detail = await _probe_introspection()
         checks: dict = {"introspection": probe_status}
         if detail:
             checks["introspection_detail"] = detail
         response["checks"] = checks
         if probe_status != "ok":
+            response["status"] = "degraded"
+    elif REDMINE_AUTH_MODE == "legacy-per-user":
+        probe_status, detail = await _probe_redmine_reachable()
+        checks: dict = {"redmine": probe_status}
+        if detail:
+            checks["redmine_detail"] = detail
+        response["checks"] = checks
+        if probe_status == "unreachable":
             response["status"] = "degraded"
     else:
         probe_status, detail = await _probe_redmine_legacy()

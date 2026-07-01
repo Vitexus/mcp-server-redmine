@@ -1,6 +1,7 @@
 """Environment-variable accessor helpers."""
 
 import os
+from pathlib import Path
 
 
 def _is_true_env(var_name: str, default: str = "false") -> bool:
@@ -59,6 +60,81 @@ def _get_int_env(var_name: str, default: int) -> int:
         return default
 
 
+def _get_upload_file_roots() -> list[str]:
+    """Return realpath-resolved directory roots allowed as ``file_path`` upload
+    sources.
+
+    Always includes ``realpath(ATTACHMENTS_DIR)`` (default ``./attachments``),
+    where downloaded attachments are written. Additional roots come from
+    ``REDMINE_MCP_UPLOAD_FILE_ROOTS`` (``os.pathsep``-separated). Blank entries
+    are skipped and duplicates are removed while preserving order.
+    """
+    roots: list[str] = []
+
+    def _add(path: str) -> None:
+        resolved = os.path.realpath(path)
+        if resolved not in roots:
+            roots.append(resolved)
+
+    _add(os.getenv("ATTACHMENTS_DIR", "./attachments"))
+    raw = os.getenv("REDMINE_MCP_UPLOAD_FILE_ROOTS", "")
+    for entry in raw.split(os.pathsep):
+        entry = entry.strip()
+        if entry:
+            _add(entry)
+    return roots
+
+
+def get_secret(var_name: str) -> str | None:
+    """Return a secret from an env var or Docker/Kubernetes-style file env var."""
+    value = os.getenv(var_name)
+    if value:
+        return value
+
+    file_name = os.getenv(f"{var_name}_FILE")
+    if not file_name:
+        return None
+
+    try:
+        return Path(file_name).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not read secret file for {var_name}_FILE " f"({file_name}): {exc}"
+        ) from exc
+
+
+def get_required(
+    var_name: str,
+    *,
+    error_text: str | None = None,
+) -> str:
+    """Return a required environment variable or raise a clear RuntimeError."""
+    value = os.getenv(var_name)
+    if value:
+        return value
+
+    message = f"Missing required env var: {var_name}."
+    if error_text:
+        message = f"{message} {error_text}"
+    raise RuntimeError(message)
+
+
+def get_required_secret(
+    var_name: str,
+    *,
+    error_text: str | None = None,
+) -> str:
+    """Return a required secret from env or a file env var."""
+    value = get_secret(var_name)
+    if value:
+        return value
+
+    message = f"Missing required secret env var: {var_name} or {var_name}_FILE."
+    if error_text:
+        message = f"{message} {error_text}"
+    raise RuntimeError(message)
+
+
 def get_introspection_credentials() -> tuple[str | None, str | None]:
     """Return (client_id, client_secret) for the Doorkeeper introspection client.
 
@@ -66,9 +142,10 @@ def get_introspection_credentials() -> tuple[str | None, str | None]:
     (None, None) if neither is set. Callers that need fail-fast behaviour
     should use require_introspection_credentials().
     """
-    client_id = os.getenv("REDMINE_INTROSPECT_CLIENT_ID") or None
-    client_secret = os.getenv("REDMINE_INTROSPECT_CLIENT_SECRET") or None
-    return client_id, client_secret
+    return (
+        os.getenv("REDMINE_INTROSPECT_CLIENT_ID") or None,
+        get_secret("REDMINE_INTROSPECT_CLIENT_SECRET"),
+    )
 
 
 def require_introspection_credentials() -> tuple[str, str]:
@@ -77,23 +154,46 @@ def require_introspection_credentials() -> tuple[str, str]:
     Used at OAuth-mode startup so the server fails fast instead of returning
     401 on every request.
     """
-    client_id, client_secret = get_introspection_credentials()
-    missing = []
-    if not client_id:
-        missing.append("REDMINE_INTROSPECT_CLIENT_ID")
-    if not client_secret:
-        missing.append("REDMINE_INTROSPECT_CLIENT_SECRET")
-    if missing:
-        raise RuntimeError(
-            "OAuth mode requires Doorkeeper introspection credentials. "
-            f"Missing env var(s): {', '.join(missing)}. "
-            "Register a confidential OAuth client in Redmine and configure "
-            "Doorkeeper's allow_token_introspection block to accept it "
-            "(see docs/oauth-setup.md Step 2 for the walkthrough)."
-        )
-    return client_id, client_secret
+    error_text = (
+        "OAuth mode requires Doorkeeper introspection credentials. "
+        "Register a confidential OAuth client in Redmine and configure "
+        "Doorkeeper's allow_token_introspection block to accept it "
+        "(see docs/oauth-setup.md Step 2 for the walkthrough)."
+    )
+    return (
+        get_required("REDMINE_INTROSPECT_CLIENT_ID", error_text=error_text),
+        get_required_secret("REDMINE_INTROSPECT_CLIENT_SECRET", error_text=error_text),
+    )
 
 
 def get_health_introspection_ttl_seconds() -> int:
     """How long /health caches the Doorkeeper introspection probe result."""
     return _get_int_env("HEALTH_INTROSPECTION_TTL_SECONDS", 30)
+
+
+def get_allowed_client_redirect_uris() -> list[str] | None:
+    """Allowed client redirect-URI patterns for oauth-proxy mode.
+
+    Controls which redirect URIs an MCP client may register and use via
+    ``REDMINE_MCP_ALLOWED_CLIENT_REDIRECT_URIS``:
+
+    - Unset: loopback-only default (``http://localhost:*`` and
+      ``http://127.0.0.1:*``), which covers the common local-client case
+      while blocking remote redirect targets.
+    - A literal ``*``: returns ``None``, which tells FastMCP's ``OAuthProxy``
+      to accept any redirect URI (the DCR-permissive default). Use only when
+      hosted clients with non-loopback redirect URIs are required.
+    - Otherwise: a comma- or space-separated list of glob patterns, e.g.
+      ``https://app.example.com/*``.
+
+    A blank value falls back to the loopback default rather than accepting
+    none, since an empty allowlist would reject every client.
+    """
+    loopback = ["http://localhost:*", "http://127.0.0.1:*"]
+    raw = os.getenv("REDMINE_MCP_ALLOWED_CLIENT_REDIRECT_URIS")
+    if raw is None:
+        return loopback
+    if raw.strip() == "*":
+        return None
+    patterns = [p for p in raw.replace(",", " ").split() if p]
+    return patterns or loopback

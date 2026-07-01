@@ -7,7 +7,7 @@ import logging
 from typing import Annotated, Any, Dict, List, Literal, Optional, Set, Union
 
 from pydantic import Field
-from redminelib.exceptions import ValidationError
+from redminelib.exceptions import ResourceNotFoundError, ValidationError
 
 from .._cleanup import _ensure_cleanup_started
 from .._client import _get_redmine_client, logger
@@ -34,6 +34,7 @@ from .._serialization import (
 )
 from .._validation import _is_positive_int
 from ..server import mcp
+from .files import _build_issue_uploads
 
 _VALID_ISSUE_RELATION_TYPES: Set[str] = {
     "relates",
@@ -205,6 +206,7 @@ def _issue_to_dict(issue: Any, include_custom_fields: bool = False) -> Dict[str,
     status = getattr(issue, "status", None)
     priority = getattr(issue, "priority", None)
     author = getattr(issue, "author", None)
+    tracker = getattr(issue, "tracker", None)
 
     issue_dict = {
         "id": getattr(issue, "id", None),
@@ -218,6 +220,9 @@ def _issue_to_dict(issue: Any, include_custom_fields: bool = False) -> Dict[str,
         ),
         "priority": (
             {"id": priority.id, "name": priority.name} if priority is not None else None
+        ),
+        "tracker": (
+            {"id": tracker.id, "name": tracker.name} if tracker is not None else None
         ),
         "author": (
             {"id": author.id, "name": author.name} if author is not None else None
@@ -258,6 +263,7 @@ def _issue_to_dict_selective(
         - project: Project info (dict with id and name)
         - status: Status info (dict with id and name)
         - priority: Priority info (dict with id and name)
+        - tracker: Tracker/type info (dict with id and name, or None)
         - author: Author info (dict with id and name)
         - assigned_to: Assigned user info (dict with id and name, or None)
         - created_on: Creation timestamp (ISO format)
@@ -287,6 +293,7 @@ def _issue_to_dict_selective(
     status = getattr(issue, "status", None)
     priority = getattr(issue, "priority", None)
     author = getattr(issue, "author", None)
+    tracker = getattr(issue, "tracker", None)
 
     all_fields = {
         "id": getattr(issue, "id", None),
@@ -300,6 +307,9 @@ def _issue_to_dict_selective(
         ),
         "priority": (
             {"id": priority.id, "name": priority.name} if priority is not None else None
+        ),
+        "tracker": (
+            {"id": tracker.id, "name": tracker.name} if tracker is not None else None
         ),
         "author": (
             {"id": author.id, "name": author.name} if author is not None else None
@@ -320,6 +330,60 @@ def _issue_to_dict_selective(
     return {key: all_fields[key] for key in fields if key in all_fields}
 
 
+# Attribute changes whose values are free-form user text (rather than numeric
+# IDs, enums or dates) and so must be wrapped against prompt injection.
+_FREE_TEXT_ATTR_NAMES = {"description", "subject"}
+
+
+def _detail_value_is_free_text(property_name: Any, field_name: Any) -> bool:
+    """Whether a journal detail's old/new values are free-form user text.
+
+    Custom-field values (``cf``), the free-text attributes ``description`` and
+    ``subject``, and attachment filenames (``attachment``) carry
+    attacker-controllable prose and must be wrapped like journal notes are.
+    Everything else (status/assignee/priority IDs, dates, numbers) is
+    structured and left raw to avoid bloating the output with boundary tags.
+    """
+    if property_name in ("cf", "attachment"):
+        return True
+    if property_name == "attr" and field_name in _FREE_TEXT_ATTR_NAMES:
+        return True
+    return False
+
+
+def _journal_details_to_list(journal: Any) -> List[Dict[str, Any]]:
+    """Convert a journal's raw ``details`` (list of dicts) to a serializable list.
+
+    python-redmine exposes journal field-changes as plain dicts with keys
+    ``property``, ``name``, ``old_value`` and ``new_value``. The ``getattr``
+    fallback defends against the library ever wrapping the items in objects.
+
+    Free-text values (custom fields, ``description``/``subject`` edits,
+    attachment filenames) are passed through ``wrap_insecure_content`` so that
+    field-change history cannot smuggle prompt-injection payloads past the same
+    protection applied to journal notes.
+    """
+    raw = getattr(journal, "details", None)
+    if not raw:
+        return []
+    details: List[Dict[str, Any]] = []
+    try:
+        iterator = iter(raw)
+    except TypeError:
+        return []
+    keys = ("property", "name", "old_value", "new_value")
+    for d in iterator:
+        if isinstance(d, dict):
+            item = {k: d.get(k) for k in keys}
+        else:
+            item = {k: getattr(d, k, None) for k in keys}
+        if _detail_value_is_free_text(item["property"], item["name"]):
+            item["old_value"] = wrap_insecure_content(item["old_value"])
+            item["new_value"] = wrap_insecure_content(item["new_value"])
+        details.append(item)
+    return details
+
+
 def _journals_to_list(issue: Any) -> List[Dict[str, Any]]:
     """Convert journals on an issue object to a list of dicts."""
     raw_journals = getattr(issue, "journals", None)
@@ -334,7 +398,10 @@ def _journals_to_list(issue: Any) -> List[Dict[str, Any]]:
 
     for journal in iterator:
         notes = getattr(journal, "notes", "")
-        if not notes:
+        details = _journal_details_to_list(journal)
+        # Keep journals that have a note OR field-change details. Entries with
+        # neither carry no information and are skipped.
+        if not notes and not details:
             continue
         user = getattr(journal, "user", None)
         journals.append(
@@ -348,8 +415,10 @@ def _journals_to_list(issue: Any) -> List[Dict[str, Any]]:
                     if user is not None
                     else None
                 ),
-                "notes": wrap_insecure_content(notes),
+                "notes": wrap_insecure_content(notes) if notes else "",
                 "created_on": _safe_isoformat(getattr(journal, "created_on", None)),
+                "private_notes": bool(getattr(journal, "private_notes", False)),
+                "details": details,
             }
         )
     return journals
@@ -370,6 +439,20 @@ def _attachments_to_list(issue: Any) -> List[Dict[str, Any]]:
     for attachment in iterator:
         attachments.append(_attachment_to_dict(attachment))
     return attachments
+
+
+def _newest_journal_id(issue: Any) -> Optional[int]:
+    """Return the id of the newest journal on an issue, or None."""
+    raw = getattr(issue, "journals", None) or []
+    ids = [getattr(j, "id", None) for j in raw if getattr(j, "id", None) is not None]
+    return max(ids) if ids else None
+
+
+def _augment_with_upload_result(result: Dict[str, Any], issue: Any) -> Dict[str, Any]:
+    """Add attachment metadata + newest journal_id to an issue result dict."""
+    result["attachments"] = _attachments_to_list(issue)
+    result["journal_id"] = _newest_journal_id(issue)
+    return result
 
 
 def _issue_relation_to_dict(relation: Any) -> Dict[str, Any]:
@@ -413,6 +496,7 @@ def _journal_to_dict(journal: Any, include_private_flag: bool = True) -> Dict[st
         ),
         "notes": wrap_insecure_content(notes) if notes else "",
         "created_on": _safe_isoformat(getattr(journal, "created_on", None)),
+        "details": _journal_details_to_list(journal),
     }
     if include_private_flag:
         entry["private_notes"] = bool(getattr(journal, "private_notes", False))
@@ -604,7 +688,7 @@ async def list_redmine_issues(
             metadata (default: False).
         fields: List of field names to include in results (default: all).
             Available: id, subject, description, project, status, priority,
-            author, assigned_to, created_on, updated_on.
+            tracker, author, assigned_to, created_on, updated_on.
         filters: Additional Redmine API filter parameters as a dict. Use this
             for any filter not listed above (e.g., {"cf_1": "value"}).
 
@@ -818,7 +902,7 @@ async def search_redmine_issues(
             metadata (default: False).
         fields: List of field names to include in results (default: all).
             Available: id, subject, description, project, status, priority,
-            author, assigned_to, created_on, updated_on.
+            tracker, author, assigned_to, created_on, updated_on.
         scope: Search scope. Values: "all", "my_project", "subprojects".
         open_issues: Search only open issues (default: False).
         options: Additional Redmine Search API parameters as a dict.
@@ -994,6 +1078,7 @@ async def create_redmine_issue(
     description: str = "",
     fields: Optional[Union[Dict[str, Any], str]] = None,
     extra_fields: Optional[Union[Dict[str, Any], str]] = None,
+    uploads: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Create a new issue in Redmine. Open a ticket, file a bug,
     submit a feature request, log a support case, or report a task.
@@ -1039,6 +1124,20 @@ async def create_redmine_issue(
     issue_fields.pop("description", None)
     issue_fields.pop("extra_fields", None)
 
+    if "uploads" in issue_fields:
+        return {
+            "error": (
+                "Put attachments in the dedicated 'uploads' parameter, not in "
+                "'fields' or 'extra_fields'."
+            )
+        }
+
+    upload_descriptors: List[Dict[str, Any]] = []
+    if uploads:
+        upload_descriptors, upload_error = await _build_issue_uploads(uploads)
+        if upload_error is not None:
+            return upload_error
+
     # Resolve name-keyed custom fields (e.g. fields={"Department": "..."})
     # to id-keyed custom_fields entries Redmine expects. See #123 for
     # the cross-tool parity rationale.
@@ -1048,12 +1147,20 @@ async def create_redmine_issue(
         return {"error": str(e)}
 
     try:
+        create_kwargs = dict(issue_fields)
+        if upload_descriptors:
+            create_kwargs["uploads"] = upload_descriptors
         issue = _get_redmine_client().issue.create(
             project_id=project_id,
             subject=subject,
             description=description,
-            **issue_fields,
+            **create_kwargs,
         )
+        if upload_descriptors:
+            fetched = _get_redmine_client().issue.get(
+                issue.id, include="attachments,journals"
+            )
+            return _augment_with_upload_result(_issue_to_dict(fetched), fetched)
         return _issue_to_dict(issue)
     except ValidationError as e:
         if not _is_required_custom_field_autofill_enabled():
@@ -1087,12 +1194,20 @@ async def create_redmine_issue(
                 "Retrying issue creation with auto-filled custom fields: %s",
                 missing_names,
             )
+            retry_create_kwargs = dict(retry_fields)
+            if upload_descriptors:
+                retry_create_kwargs["uploads"] = upload_descriptors
             issue = _get_redmine_client().issue.create(
                 project_id=project_id,
                 subject=subject,
                 description=description,
-                **retry_fields,
+                **retry_create_kwargs,
             )
+            if upload_descriptors:
+                fetched = _get_redmine_client().issue.get(
+                    issue.id, include="attachments,journals"
+                )
+                return _augment_with_upload_result(_issue_to_dict(fetched), fetched)
             return _issue_to_dict(issue)
         except Exception as retry_error:
             # The retry failure may also be a ValidationError; surface the
@@ -1104,12 +1219,44 @@ async def create_redmine_issue(
                 ),
                 str(retry_error),
             )
+    except ResourceNotFoundError:
+        # A 404 on a create POST is anomalous: the issue may have been created
+        # anyway. The 404 generally comes from the deployment or from Redmine
+        # itself rather than a genuinely missing resource (e.g. a sub-URI or
+        # Passenger deployment, a reverse proxy, or a plugin or controller
+        # filter on the create path), so Redmine can process the POST while the
+        # client ultimately sees a 404. Returning the bare "not found" message
+        # invites blind retries and risks silent duplicate issues (see #146), so
+        # warn the caller to verify first.
+        logger.warning(
+            "create issue returned HTTP 404 for project %s; the issue may have "
+            "been created. The 404 likely originates from the deployment or "
+            "Redmine itself (a sub-URI/Passenger setup, a reverse proxy, or a "
+            "plugin or controller filter on the create path) rather than a "
+            "missing resource.",
+            project_id,
+        )
+        return {
+            "error": (
+                "Redmine returned HTTP 404 for the create request, but the issue "
+                "may have been created anyway. This usually originates from the "
+                "deployment or from Redmine itself rather than a missing "
+                "resource (for example a sub-URI/Passenger deployment, a reverse "
+                "proxy, or a plugin or controller filter on the create path). "
+                "Before retrying, check Redmine for a newly created issue to "
+                "avoid creating a duplicate."
+            )
+        }
     except Exception as e:
         return _handle_redmine_error(e, f"creating issue in project {project_id}")
 
 
 @mcp.tool()
-async def update_redmine_issue(issue_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+async def update_redmine_issue(
+    issue_id: int,
+    fields: Dict[str, Any],
+    uploads: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """Update an existing Redmine issue.
 
     In addition to standard Redmine fields, a ``status_name`` key may be
@@ -1129,6 +1276,20 @@ async def update_redmine_issue(issue_id: int, fields: Dict[str, Any]) -> Dict[st
 
     if _is_read_only_mode():
         return dict(_READ_ONLY_ERROR)
+
+    if "uploads" in fields:
+        return {
+            "error": (
+                "Put attachments in the dedicated 'uploads' parameter, not in "
+                "'fields'."
+            )
+        }
+
+    upload_descriptors: List[Dict[str, Any]] = []
+    if uploads:
+        upload_descriptors, upload_error = await _build_issue_uploads(uploads)
+        if upload_error is not None:
+            return upload_error
 
     update_fields = dict(fields)
 
@@ -1157,9 +1318,12 @@ async def update_redmine_issue(issue_id: int, fields: Dict[str, Any]) -> Dict[st
             logger.warning(f"Error resolving status name '{name}': {e}")
 
     try:
-        if update_fields:
+        if update_fields or upload_descriptors:
             update_fields = _map_named_custom_fields_for_update(issue_id, update_fields)
-            _get_redmine_client().issue.update(issue_id, **update_fields)
+            update_kwargs = dict(update_fields)
+            if upload_descriptors:
+                update_kwargs["uploads"] = upload_descriptors
+            _get_redmine_client().issue.update(issue_id, **update_kwargs)
         if agile_update_needed:
             try:
                 _apply_agile_story_points(issue_id, story_points)
@@ -1169,6 +1333,14 @@ async def update_redmine_issue(issue_id: int, fields: Dict[str, Any]) -> Dict[st
                     f"updating agile story_points for issue {issue_id}",
                     {"resource_type": "issue", "resource_id": issue_id},
                 )
+        if upload_descriptors:
+            updated_issue = _get_redmine_client().issue.get(
+                issue_id, include="attachments,journals"
+            )
+            return _augment_with_upload_result(
+                _issue_to_dict(updated_issue, include_custom_fields=True),
+                updated_issue,
+            )
         updated_issue = _get_redmine_client().issue.get(issue_id)
         return _issue_to_dict(updated_issue, include_custom_fields=True)
     except ValidationError as e:
@@ -1228,7 +1400,10 @@ async def update_redmine_issue(issue_id: int, fields: Dict[str, Any]) -> Dict[st
                 "Retrying issue update with auto-filled custom fields: %s",
                 missing_names,
             )
-            _get_redmine_client().issue.update(issue_id, **retry_fields)
+            retry_kwargs = dict(retry_fields)
+            if upload_descriptors:
+                retry_kwargs["uploads"] = upload_descriptors
+            _get_redmine_client().issue.update(issue_id, **retry_kwargs)
             if agile_update_needed:
                 try:
                     _apply_agile_story_points(issue_id, story_points)
@@ -1238,6 +1413,14 @@ async def update_redmine_issue(issue_id: int, fields: Dict[str, Any]) -> Dict[st
                         f"updating agile story_points for issue {issue_id}",
                         {"resource_type": "issue", "resource_id": issue_id},
                     )
+            if upload_descriptors:
+                updated_issue = _get_redmine_client().issue.get(
+                    issue_id, include="attachments,journals"
+                )
+                return _augment_with_upload_result(
+                    _issue_to_dict(updated_issue, include_custom_fields=True),
+                    updated_issue,
+                )
             updated_issue = _get_redmine_client().issue.get(issue_id)
             return _issue_to_dict(updated_issue, include_custom_fields=True)
         except Exception as retry_error:

@@ -12,6 +12,14 @@ A Model Context Protocol (MCP) server that integrates with Redmine project manag
 
 **mcp-name: io.github.jztan/redmine-mcp-server**
 
+<p align="center">
+  <a href="https://redmine-mcp-server.jztan.com">
+    <img src="https://raw.githubusercontent.com/jztan/redmine-mcp-server/develop/assets/redmine-mcp-demo.gif" alt="An AI agent triaging a Redmine sprint backlog through redmine-mcp-server" width="820" />
+  </a>
+</p>
+
+<p align="center"><sub>An AI agent triaging a Redmine sprint through redmine-mcp-server. <a href="https://redmine-mcp-server.jztan.com">Try the live demo →</a></sub></p>
+
 ## [Tool reference](./docs/tool-reference.md) | [Changelog](./CHANGELOG.md) | [Contributing](./docs/contributing.md) | [Troubleshooting](./docs/troubleshooting.md)
 
 ## Features
@@ -99,13 +107,21 @@ The server runs on `http://localhost:8000` with the MCP endpoint at `/mcp`, heal
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `REDMINE_URL` | Yes | – | Base URL of your Redmine instance |
-| `REDMINE_AUTH_MODE` | No | `legacy` | Authentication mode: `legacy` or `oauth` (see [Authentication](#authentication)) |
+| `REDMINE_AUTH_MODE` | No | `legacy` | Authentication mode: `legacy`, `legacy-per-user`, `oauth`, or `oauth-proxy` (see [Authentication](#authentication)) |
+| `REDMINE_PER_USER_TRUST_PROXY` | Yes* | `false` | Required for `legacy-per-user` mode. Operator attestation: "this server sits behind TLS and my proxy does not forward client `X-Forwarded-Proto`." |
+| `REDMINE_PER_USER_AUDIT_IDENTITY` | No | `false` | `legacy-per-user` only: resolve and log the Redmine user ID per request (adds one extra round-trip) |
 | `REDMINE_API_KEY` | Yes† | – | API key (legacy mode only) |
 | `REDMINE_USERNAME` | Yes† | – | Username for basic auth (legacy mode only) |
 | `REDMINE_PASSWORD` | Yes† | – | Password for basic auth (legacy mode only) |
-| `REDMINE_MCP_BASE_URL` | Yes‡ | `http://localhost:3040` | Public base URL of this server, no trailing slash (OAuth mode only) |
-| `REDMINE_INTROSPECT_CLIENT_ID` | Yes‡ | – | Doorkeeper OAuth client ID used by the MCP server to introspect Bearer tokens (RFC 7662). Register a confidential OAuth app in Redmine with `protected_resource?` permission — see [`docs/oauth-setup.md`](docs/oauth-setup.md) Step 2. |
+| `REDMINE_MCP_BASE_URL` | Yes‡ | `http://localhost:3040` | Public base URL of this server, no trailing slash (OAuth modes only) |
+| `FASTMCP_STREAMABLE_HTTP_PATH` | No | `/mcp` | MCP transport path inside `REDMINE_MCP_BASE_URL` |
+| `REDMINE_INTROSPECT_CLIENT_ID` | Yes‡ | – | Doorkeeper OAuth client ID used by the MCP server to introspect Bearer tokens (RFC 7662). Register a confidential OAuth app in Redmine — see [`docs/oauth-setup.md`](docs/oauth-setup.md) Step 2. |
 | `REDMINE_INTROSPECT_CLIENT_SECRET` | Yes‡ | – | Secret for the introspection client |
+| `REDMINE_MCP_JWT_SIGNING_KEY` | Yes§ | – | Stable signing/encryption key used by FastMCP OAuthProxy tokens and storage |
+| `REDMINE_OAUTH_CLIENT_ID` | No | – | Optional upstream Redmine OAuth client ID for `oauth-proxy`; defaults to `REDMINE_INTROSPECT_CLIENT_ID` |
+| `REDMINE_OAUTH_CLIENT_SECRET` | No | – | Optional upstream Redmine OAuth client secret for `oauth-proxy`; defaults to `REDMINE_INTROSPECT_CLIENT_SECRET` |
+| `FASTMCP_HOME` | No | platform default | FastMCP data directory. In `oauth-proxy` mode, encrypted OAuthProxy state is stored below `FASTMCP_HOME/oauth-proxy/` |
+| `REDMINE_MCP_ALLOWED_CLIENT_REDIRECT_URIS` | No | loopback only | `oauth-proxy` client redirect-URI allowlist (glob patterns, comma/space separated). Unset = `http://localhost:*` and `http://127.0.0.1:*`; `*` = allow any |
 | `HEALTH_INTROSPECTION_TTL_SECONDS` | No | `30` | TTL (seconds) for the `/health` Doorkeeper introspection probe cache. Set to `0` to disable caching. |
 | `SERVER_HOST` | No | `0.0.0.0` | Host/IP the MCP server binds to |
 | `SERVER_PORT` | No | `8000` | Port the MCP server listens on |
@@ -114,6 +130,7 @@ The server runs on `http://localhost:8000` with the MCP endpoint at `/mcp`, heal
 | `REDMINE_PUBLIC_URL` | No | – | Publicly-reachable URL of your Redmine instance. When set, `content_url` values returned on attachments are rewritten from `REDMINE_URL`'s origin to this one (preserving path/query/fragment and any reverse-proxy subpath). Useful when `REDMINE_URL` is the internal container hostname unreachable from MCP clients. When unset, the raw URL Redmine echoes back is returned. |
 | `ATTACHMENTS_DIR` | No | `./attachments` | Directory for downloaded attachments |
 | `ATTACHMENT_MAX_DOWNLOAD_BYTES` | No | `209715200` (200 MB) | Cap applied to every `get_redmine_attachment` download regardless of content type. Exceeding the cap aborts the download mid-stream and deletes the partial file. |
+| `REDMINE_MCP_UPLOAD_FILE_ROOTS` | No | – | Extra directories allowed as `file_path` upload sources (OS path separator-separated). `ATTACHMENTS_DIR` is always allowed. Unset restricts uploads to `ATTACHMENTS_DIR` only. |
 | `AUTO_CLEANUP_ENABLED` | No | `true` | Toggle automatic cleanup of expired attachments |
 | `CLEANUP_INTERVAL_MINUTES` | No | `10` | Interval for cleanup task |
 | `ATTACHMENT_EXPIRES_MINUTES` | No | `60` | Expiry window for generated download URLs |
@@ -131,8 +148,11 @@ The server runs on `http://localhost:8000` with the MCP endpoint at `/mcp`, heal
 | `REDMINE_REQUIRED_CUSTOM_FIELD_DEFAULTS` | No | `{}` | JSON object mapping required custom field names to fallback values used when creating issues |
 | `REDMINE_ALLOW_PRIVATE_FETCH_URLS` | No | `false` | **Warning:** disables all SSRF protection for attachment fetching. Never set to `true` in production. |
 
+*\* Required when `REDMINE_AUTH_MODE=legacy-per-user`.*
 *† Required when `REDMINE_AUTH_MODE=legacy`. Either `REDMINE_API_KEY` or `REDMINE_USERNAME`+`REDMINE_PASSWORD` must be set. API key is recommended.*
-*‡ Required when `REDMINE_AUTH_MODE=oauth`.*
+*‡ Required when `REDMINE_AUTH_MODE=oauth` or `REDMINE_AUTH_MODE=oauth-proxy`.*
+*§ Required when `REDMINE_AUTH_MODE=oauth-proxy`.*
+Secret values can also be supplied with Docker/Kubernetes-style file variables: `REDMINE_INTROSPECT_CLIENT_SECRET_FILE`, `REDMINE_MCP_JWT_SIGNING_KEY_FILE`, and `REDMINE_OAUTH_CLIENT_SECRET_FILE`.
 
 When `REDMINE_AUTOFILL_REQUIRED_CUSTOM_FIELDS=true`, `create_redmine_issue` retries once on relevant custom-field validation errors (for example `<Field Name> cannot be blank` or `<Field Name> is not included in the list`) and fills values only from:
 - the Redmine custom field `default_value`, or
@@ -202,16 +222,23 @@ For SSL troubleshooting, see the [Troubleshooting Guide](./docs/troubleshooting.
 
 ## Authentication
 
-The server supports two authentication modes, selected via `REDMINE_AUTH_MODE`.
+The server supports four authentication modes, selected via `REDMINE_AUTH_MODE`. It defaults to `legacy`, so existing deployments keep working with no changes; OAuth2 support is purely additive.
 
-> **Backward compatibility**: `REDMINE_AUTH_MODE` defaults to `legacy`, so all existing deployments continue to work without any configuration changes. OAuth2 support is purely additive — nothing breaks if you never set the variable.
+| Your situation | Mode | Redmine |
+|---|---|---|
+| Single shared credential, simplest setup | `legacy` (default) | any |
+| Multi-user, you control the MCP client | `oauth` | 6.1+ |
+| Hosted server, clients self-register (DCR) | `oauth-proxy` | 6.1+ |
+| Multi-user, Redmine too old for OAuth | `legacy-per-user` | < 6.1 |
+
+The advanced modes are collapsed below. For full setup, the [OAuth2 Setup Guide](./docs/oauth-setup.md) covers `oauth` and `oauth-proxy`, and the [legacy-per-user guide](./docs/legacy-per-user-auth.md) covers `legacy-per-user`.
 
 ### Legacy mode (default)
 
-Uses a single shared credential — either an API key or a username/password pair — configured once in `.env`. Every request to Redmine uses the same identity.
+A single shared credential (API key or username/password) configured once in `.env`. Every request to Redmine uses the same identity.
 
 ```bash
-REDMINE_AUTH_MODE=legacy        # or omit entirely — this is the default
+REDMINE_AUTH_MODE=legacy        # or omit entirely; this is the default
 REDMINE_URL=https://redmine.example.com
 REDMINE_API_KEY=your_api_key
 # OR:
@@ -219,42 +246,92 @@ REDMINE_API_KEY=your_api_key
 # REDMINE_PASSWORD=your_password
 ```
 
-### OAuth2 mode
+<details>
+<summary><strong>OAuth2 mode</strong> (multi-user, Redmine 6.1+)</summary>
 
-> **Requires Redmine 6.1 or newer.** OAuth2 support (via the Doorkeeper gem) was introduced in Redmine 6.1.
-
-Each MCP request carries its own `Authorization: Bearer <token>` header. Since v2.1, the server validates the token against Doorkeeper's RFC 7662 introspection endpoint (`POST /oauth/introspect`) on Redmine before forwarding it. This enables multi-user deployments where each user authenticates with their own Redmine account, with the token's scopes available to the server (unlocking future per-tool scope enforcement).
+Each MCP request carries its own `Authorization: Bearer <token>`, so every user authenticates with their own Redmine account. The server validates each token against Doorkeeper's introspection endpoint before forwarding it, and exposes the OAuth2 discovery and `/revoke` endpoints clients need.
 
 ```bash
 REDMINE_AUTH_MODE=oauth
 REDMINE_URL=https://redmine.example.com
 REDMINE_MCP_BASE_URL=https://redmine-mcp.example.com   # public URL of this server
 
-# Introspection client (register a confidential OAuth app in Redmine; see docs/oauth-setup.md)
+# Confidential OAuth app registered in Redmine admin (see setup guide)
 REDMINE_INTROSPECT_CLIENT_ID=...
 REDMINE_INTROSPECT_CLIENT_SECRET=...
 ```
 
-In OAuth mode the server also exposes OAuth2 discovery and token management endpoints:
+You register the OAuth app manually in Redmine admin → **Applications** (no Dynamic Client Registration). Full walkthrough, endpoint reference, and troubleshooting: [OAuth2 Setup Guide](./docs/oauth-setup.md).
 
-| Endpoint | Standard | Purpose |
-|----------|----------|---------|
-| `/.well-known/oauth-protected-resource/mcp` | RFC 9728 §3.1 | Tells clients where to find the authorization server (mounted by FastMCP `RemoteAuthProvider`) |
-| `/.well-known/oauth-authorization-server/mcp` | RFC 8414 | Advertises Redmine's Doorkeeper OAuth endpoints, scoped to this MCP resource |
-| `POST /revoke` | RFC 7009 | Revokes an OAuth2 token (proxies to Redmine's `/oauth/revoke`) |
+</details>
 
-Redmine uses the [Doorkeeper](https://github.com/doorkeeper-gem/doorkeeper) gem for OAuth2 but does not serve the RFC 8414 discovery document itself. This server serves path-scoped metadata on Redmine's behalf, pointing to Redmine's real `/oauth/authorize`, `/oauth/token`, and `/oauth/revoke` endpoints.
+<details>
+<summary><strong>OAuthProxy mode</strong> (hosted deployments with client self-registration)</summary>
 
-**Prerequisites for OAuth mode:**
-- An OAuth application registered in Redmine admin → **Applications** with the callback URL of your client
-- A client that handles the authorization code flow, stores the resulting token per user, and sends it as `Authorization: Bearer <token>` on every MCP request
-- No Dynamic Client Registration (DCR) is required — register the application manually in Redmine admin
+FastMCP acts as the MCP-facing authorization server: it handles DCR for MCP clients, then redirects users to Redmine as the upstream OAuth provider for consent. Use this when clients (e.g. Claude Desktop, VS Code) expect to register themselves.
 
-For step-by-step setup instructions, see the [OAuth2 Setup Guide](./docs/oauth-setup.md).
+```bash
+REDMINE_AUTH_MODE=oauth-proxy
+REDMINE_URL=https://redmine.example.com
+REDMINE_MCP_BASE_URL=https://redmine-mcp.example.com   # public URL of this server
+
+# Confidential OAuth app registered in Redmine admin (see setup guide)
+REDMINE_INTROSPECT_CLIENT_ID=...
+REDMINE_INTROSPECT_CLIENT_SECRET=...
+REDMINE_MCP_JWT_SIGNING_KEY=...
+```
+
+The upstream Redmine app must register `${REDMINE_MCP_BASE_URL}/auth/callback` as its redirect URI. Storage, scaling, and credential-reuse notes are in the [OAuth2 Setup Guide](./docs/oauth-setup.md).
+
+</details>
+
+<details>
+<summary><strong>legacy-per-user mode</strong> (Redmine older than 6.1)</summary>
+
+For Redmine instances too old for OAuth, each user's MCP client sends its own Redmine API key in an `X-Redmine-API-Key` header. Each request runs as that user's identity with that user's permissions.
+
+**This is an advanced, opt-in mode.** It requires TLS end-to-end and a correctly configured reverse proxy. Read [`docs/legacy-per-user-auth.md`](docs/legacy-per-user-auth.md) for the threat model, firewall guidance, and revocation runbook before enabling it.
+
+**`mcp-remote` (recommended):**
+
+```json
+{ "mcpServers": { "redmine": {
+  "command": "npx",
+  "args": ["mcp-remote", "https://your-host/mcp",
+           "--header", "X-Redmine-API-Key:${RM_KEY}"],
+  "env": { "RM_KEY": "<your redmine api key>" }
+}}}
+```
+
+Note the colon with no surrounding spaces in `X-Redmine-API-Key:${RM_KEY}` -- this avoids an arg-escaping bug in Cursor and Claude Desktop on Windows.
+
+**VS Code (`mcp.json`):**
+
+Use `.vscode/mcp.json` (workspace file) or the user profile `mcp.json`. The workspace `.mcp.json` silently drops `headers` (see microsoft/vscode#319528), so do not use that file. Pin VS Code 1.102 or newer.
+
+```json
+{
+  "servers": {
+    "redmine": {
+      "type": "http",
+      "url": "https://your-host/mcp",
+      "headers": { "X-Redmine-API-Key": "${input:rmKey}" },
+      "inputs": [{ "id": "rmKey", "type": "promptString",
+                   "description": "Redmine API key", "password": true }]
+    }
+  }
+}
+```
+
+**Unsupported:** any client that cannot set a custom request header, or that reserves the `Authorization` header for its own OAuth flow.
+
+</details>
 
 ## MCP Client Configuration
 
 The server exposes an HTTP endpoint at `http://127.0.0.1:8000/mcp`. Register it with your preferred MCP-compatible agent using the instructions below.
+
+> The examples below assume `legacy` or `oauth` mode. In `legacy-per-user` mode each client must also send an `X-Redmine-API-Key` header; see [legacy-per-user mode](#authentication) above for header-aware configs.
 
 <details>
 <summary><strong>Visual Studio Code (Native MCP Support)</strong></summary>
@@ -448,7 +525,16 @@ curl http://localhost:8000/health
 
 ## Available Tools
 
-This MCP server provides 45 tools for interacting with Redmine (plus 1 operator tool exposed by `REDMINE_MCP_EXPOSE_ADMIN_TOOLS=true`, and 5 plugin-gated tools that opt in via env vars, for a maximum of 46 when all enabled). For detailed documentation, see [Tool Reference](./docs/tool-reference.md).
+This MCP server provides 45 tools for interacting with Redmine (plus 1 operator tool exposed by `REDMINE_MCP_EXPOSE_ADMIN_TOOLS=true`, and 5 plugin-gated tools that opt in via env vars, for a maximum of 46 when all enabled). For full documentation of every tool, see the [Tool Reference](./docs/tool-reference.md).
+
+**Core tools (40, always available):** Project Management (9), Issue Operations (13), Time Tracking (4), Discovery / Enumeration (6), Search & Wiki (2), File Operations (4), Gantt (1), Meta (1).
+
+**Plugin-gated tools (5, opt in via env var):** Checklists (2), Products (1), Contacts / CRM (1), Documents / DMSF (1). Each requires the matching Redmine plugin installed **and** its env flag set; they stay hidden from `tools/list` otherwise.
+
+**Operator tools (1, admin-gated):** `cleanup_attachment_files`, registered only when `REDMINE_MCP_EXPOSE_ADMIN_TOOLS=true`.
+
+<details>
+<summary><strong>Full tool list with descriptions</strong></summary>
 
 ### Core tools (40, always available)
 
@@ -469,8 +555,8 @@ These tools require only a Redmine instance and credentials — no extra plugins
   - [`get_redmine_issue`](docs/tool-reference.md#get_redmine_issue) - Retrieve detailed issue information (supports journal pagination, watchers, relations, children)
   - [`list_redmine_issues`](docs/tool-reference.md#list_redmine_issues) - List issues with flexible filtering (project, status, assignee, etc.)
   - [`search_redmine_issues`](docs/tool-reference.md#search_redmine_issues) - Search issues by text query
-  - [`create_redmine_issue`](docs/tool-reference.md#create_redmine_issue) - Create new issues
-  - [`update_redmine_issue`](docs/tool-reference.md#update_redmine_issue) - Update existing issues
+  - [`create_redmine_issue`](docs/tool-reference.md#create_redmine_issue) - Create new issues, with optional file attachments via the `uploads` parameter
+  - [`update_redmine_issue`](docs/tool-reference.md#update_redmine_issue) - Update existing issues, with optional file attachments via the `uploads` parameter (combine with `notes` to attach files to a journal note)
   - [`delete_redmine_issue`](docs/tool-reference.md#delete_redmine_issue) - Hard-delete an issue with required confirmation flags and a cascade-impact preview before irreversible deletion.
   - [`copy_issue`](docs/tool-reference.md#copy_issue) - Duplicate an existing issue with optional field overrides
   - [`list_subtasks`](docs/tool-reference.md#list_subtasks) - List subtasks (child issues) of a given parent
@@ -501,7 +587,7 @@ These tools require only a Redmine instance and credentials — no extra plugins
 
 - **File Operations** (4 tools)
   - [`list_files`](docs/tool-reference.md#list_files) - List files uploaded to a project's Files section
-  - [`upload_file`](docs/tool-reference.md#upload_file) - Upload a new file (base64 content) to a project, optionally tied to a version
+  - [`upload_file`](docs/tool-reference.md#upload_file) - Upload a new file to a project (from base64 content, a URL, or a server-side `file_path`), optionally tied to a version
   - [`delete_file`](docs/tool-reference.md#delete_file) - Delete a file from a project
   - [`get_redmine_attachment`](docs/tool-reference.md#get_redmine_attachment) - Download an attachment (works in both HTTP and stdio mode)
 
@@ -509,7 +595,7 @@ These tools require only a Redmine instance and credentials — no extra plugins
   - [`get_gantt_chart`](docs/tool-reference.md#get_gantt_chart) - Retrieve project timeline data: issues with dates, dependencies, and milestones
 
 - **Meta** (1 tool)
-  - [`get_mcp_server_info`](docs/tool-reference.md#get_mcp_server_info) - Report server version, auth mode, read-only state, and which plugin-gated tool families are enabled. Use to detect deployment lag before relying on a recently-shipped fix.
+  - [`get_mcp_server_info`](docs/tool-reference.md#get_mcp_server_info) - Report server version, auth mode, read-only state, the authenticated user (`current_user`), and which plugin-gated tool families are enabled. Use to detect deployment lag before relying on a recently-shipped fix, or to confirm who `assigned_to_id="me"` resolves to.
 
 ### Plugin-gated tools (5, opt in via env var)
 
@@ -534,6 +620,8 @@ Hidden from `tools/list` by default. Set `REDMINE_MCP_EXPOSE_ADMIN_TOOLS=true` t
 
 - [`cleanup_attachment_files`](docs/tool-reference.md#cleanup_attachment_files) - Manually trigger cleanup of expired attachment files (the background cleanup task runs automatically regardless)
 
+</details>
+
 
 ## Docker Deployment
 
@@ -552,6 +640,21 @@ docker build -t redmine-mcp-server .
 docker run -p 8000:8000 --env-file .env.docker redmine-mcp-server
 ```
 
+### Use the Published Image
+
+Prebuilt multi-architecture images (`linux/amd64`, `linux/arm64`) are published to
+the GitHub Container Registry on each release, so you can run the server without
+building it yourself:
+
+```bash
+docker pull ghcr.io/jztan/redmine-mcp-server:latest
+docker run -p 8000:8000 --env-file .env.docker ghcr.io/jztan/redmine-mcp-server:latest
+```
+
+Pin to an exact version (e.g. `ghcr.io/jztan/redmine-mcp-server:2.2.0`) or track a
+minor series (e.g. `:2.2`). Published images are available starting from the next
+release.
+
 ### Production Deployment
 
 Use the automated deployment script:
@@ -569,6 +672,18 @@ If you run into any issues, checkout our [troubleshooting guide](./docs/troubles
 
 Contributions are welcome! Please see our [contributing guide](./docs/contributing.md) for details.
 
+## Contributors
+
+Thank you to everyone who has helped improve this project through code, reviews, testing, and feature requests:
+
+[@sebastianelsner](https://github.com/sebastianelsner) · [@mihajlovicjj](https://github.com/mihajlovicjj) · [@aadnehovda](https://github.com/aadnehovda) · [@martindglaser](https://github.com/martindglaser) · [@Vitexus](https://github.com/Vitexus) · [@timcomport](https://github.com/timcomport) · [@Bricklou](https://github.com/Bricklou)
+
+<a href="https://github.com/jztan/redmine-mcp-server/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=jztan/redmine-mcp-server" alt="Contributors" />
+</a>
+
+Per-release contributor credits are listed in the [Changelog](./CHANGELOG.md).
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -579,3 +694,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Blog: How I linked a legacy system to a modern AI agent with MCP](https://blog.jztan.com/how-i-linked-a-legacy-system-to-a-modern-ai-agent/?utm_source=github&utm_medium=readme&utm_campaign=redmine-mcp-server) - The story behind this project
 - [Blog: Designing Reliable MCP Servers: 3 Hard Lessons in Agentic Architecture](https://blog.jztan.com/i-gave-my-ai-agent-full-api-access-it-was-a-mistak/?utm_source=github&utm_medium=readme&utm_campaign=redmine-mcp-server) - Lessons learned building this server
 - [Blog: What It Actually Takes to Ship a Production MCP Server for Redmine](https://blog.jztan.com/what-it-actually-takes-to-ship-a-production-mcp-server-for-redmine/?utm_source=github&utm_medium=readme&utm_campaign=redmine-mcp-server) - The full journey from prototype to production
+- [Blog: MCP Tool Sprawl: How I Cut 69 Tools to 43 With a Decorator](https://blog.jztan.com/mcp-tool-sprawl-consolidation/?utm_source=github&utm_medium=readme&utm_campaign=redmine-mcp-server) - The major v2 architecture change that consolidated the tools to cut context overhead and sharpen agent tool selection

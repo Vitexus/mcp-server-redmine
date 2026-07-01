@@ -28,19 +28,12 @@ def oauth_app(monkeypatch):
     monkeypatch.delenv("REDMINE_MCP_READ_ONLY", raising=False)
 
     from redmine_mcp_server import _auth, oauth_scopes
-    from redmine_mcp_server import main as main_mod
 
     importlib.reload(oauth_scopes)
     importlib.reload(_auth)
 
     auth_provider = _auth.build_remote_auth()
     local_mcp = FastMCP("redmine_mcp_tools_test", auth=auth_provider)
-
-    # Mirror main.py: register kept custom_routes
-    local_mcp.custom_route(
-        "/.well-known/oauth-authorization-server/mcp", methods=["GET"]
-    )(main_mod.oauth_authorization_server)
-    local_mcp.custom_route("/revoke", methods=["POST"])(main_mod.revoke_token)
 
     return local_mcp.http_app(stateless_http=True)
 
@@ -86,6 +79,7 @@ async def test_authorization_server_suffix_path_returns_200(oauth_app):
         r = await client.get("/.well-known/oauth-authorization-server/mcp")
     assert r.status_code == 200
     body = r.json()
+    assert body["issuer"] == "https://r.example.com/"
     assert body["authorization_endpoint"] == "https://r.example.com/oauth/authorize"
     assert body["token_endpoint"] == "https://r.example.com/oauth/token"
     assert body["revocation_endpoint"] == "https://r.example.com/oauth/revoke"
@@ -112,16 +106,12 @@ async def test_scope_sources_filtered_consistently_in_read_only_mode(monkeypatch
     monkeypatch.setenv("REDMINE_MCP_READ_ONLY", "true")
 
     from redmine_mcp_server import _auth, oauth_scopes
-    from redmine_mcp_server import main as main_mod
 
     importlib.reload(oauth_scopes)
     importlib.reload(_auth)
 
     auth_provider = _auth.build_remote_auth()
     local_mcp = FastMCP("ro_test", auth=auth_provider)
-    local_mcp.custom_route(
-        "/.well-known/oauth-authorization-server/mcp", methods=["GET"]
-    )(main_mod.oauth_authorization_server)
     app = local_mcp.http_app(stateless_http=True)
 
     from redmine_mcp_server.oauth_scopes import WRITE_SCOPES
@@ -135,3 +125,66 @@ async def test_scope_sources_filtered_consistently_in_read_only_mode(monkeypatch
     for write_scope in WRITE_SCOPES:
         assert write_scope not in pr["scopes_supported"]
         assert write_scope not in asm["scopes_supported"]
+
+
+@pytest.mark.asyncio
+async def test_issuer_matches_authorization_servers(oauth_app):
+    """AS-metadata issuer must be byte-identical to the authorization-server
+    identifier the protected-resource doc advertises (RFC 8414 §3.3), so a
+    spec-strict client resolves them to the same server. Regression for #140:
+    on a split-host deployment the issuer was sourced from REDMINE_MCP_BASE_URL
+    and named the MCP server instead of Redmine.
+
+    The assertion is exact (no trailing-slash normalization) on purpose: the
+    protected-resource doc serializes authorization_servers via pydantic
+    AnyHttpUrl, which appends a trailing slash for bare hosts, so the issuer
+    must carry it too or a byte-comparing client still sees a mismatch.
+    """
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=oauth_app), base_url="http://test"
+    ) as client:
+        pr = (await client.get("/.well-known/oauth-protected-resource/mcp")).json()
+        asm = (await client.get("/.well-known/oauth-authorization-server/mcp")).json()
+
+    auth_servers = [str(u) for u in pr["authorization_servers"]]
+
+    # issuer must byte-match one of the advertised authorization servers
+    assert asm["issuer"] in auth_servers
+    # ...and that server is Redmine, not the MCP server's own base URL
+    assert "r.example.com" in asm["issuer"]
+    assert "localhost:3040" not in asm["issuer"]
+
+
+@pytest.mark.asyncio
+async def test_authenticated_app_mounts_remote_auth_under_base_url_path(monkeypatch):
+    monkeypatch.setenv("REDMINE_URL", "https://r.example.com")
+    monkeypatch.setenv("REDMINE_MCP_BASE_URL", "https://mcp.example/api")
+    monkeypatch.setenv("FASTMCP_STREAMABLE_HTTP_PATH", "/mcp")
+    monkeypatch.setenv("REDMINE_INTROSPECT_CLIENT_ID", "cid")
+    monkeypatch.setenv("REDMINE_INTROSPECT_CLIENT_SECRET", "csec")
+    monkeypatch.delenv("REDMINE_MCP_READ_ONLY", raising=False)
+
+    from redmine_mcp_server import _auth, oauth_scopes
+    from redmine_mcp_server import main as main_mod
+
+    importlib.reload(oauth_scopes)
+    importlib.reload(_auth)
+
+    auth_provider = _auth.build_remote_auth()
+    local_mcp = FastMCP("remote_auth_mount_test", auth=auth_provider)
+    app = main_mod.build_authenticated_app(local_mcp, auth_provider)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.example"
+    ) as client:
+        root_prm = await client.get("/.well-known/oauth-protected-resource")
+        prm = await client.get("/.well-known/oauth-protected-resource/api/mcp")
+        asm = await client.get("/.well-known/oauth-authorization-server/api/mcp")
+        mounted_prm = await client.get("/api/mcp/.well-known/oauth-protected-resource")
+        mcp_get = await client.get("/api/mcp")
+
+    assert root_prm.status_code == 404
+    assert prm.status_code == 200
+    assert asm.status_code == 200
+    assert mounted_prm.status_code == 404
+    assert mcp_get.status_code == 405

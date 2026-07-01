@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.dependencies import get_access_token, get_http_request
 from redminelib import Redmine
 
 logger = logging.getLogger("redmine_mcp_server")
@@ -52,8 +52,9 @@ REDMINE_USERNAME = os.getenv("REDMINE_USERNAME")
 REDMINE_PASSWORD = os.getenv("REDMINE_PASSWORD")
 REDMINE_API_KEY = os.getenv("REDMINE_API_KEY")
 
-# Auth mode: "oauth" uses per-request Bearer tokens via OAuth middleware;
-# "legacy" uses REDMINE_API_KEY or REDMINE_USERNAME/REDMINE_PASSWORD (default).
+# Auth mode:
+# - "oauth" and "oauth-proxy" use per-request Bearer tokens via FastMCP auth.
+# - "legacy" uses REDMINE_API_KEY or REDMINE_USERNAME/REDMINE_PASSWORD (default).
 REDMINE_AUTH_MODE = os.getenv("REDMINE_AUTH_MODE", "legacy").lower()
 
 # SSL Configuration (optional)
@@ -98,13 +99,19 @@ if not REDMINE_URL:
         "REDMINE_URL not set. "
         "Please create a .env file in your working directory with REDMINE_URL defined."
     )
-elif REDMINE_AUTH_MODE != "oauth" and not (
+elif REDMINE_AUTH_MODE not in {"oauth", "oauth-proxy", "legacy-per-user"} and not (
     REDMINE_API_KEY or (REDMINE_USERNAME and REDMINE_PASSWORD)
 ):
     logger.warning(
         "No Redmine authentication configured. "
         "Please set REDMINE_API_KEY or REDMINE_USERNAME/REDMINE_PASSWORD "
-        "in your .env file, or set REDMINE_AUTH_MODE=oauth."
+        "in your .env file, or set REDMINE_AUTH_MODE=oauth or oauth-proxy."
+    )
+
+if REDMINE_AUTH_MODE == "legacy-per-user" and REDMINE_API_KEY:
+    logger.info(
+        "legacy-per-user mode: ignoring REDMINE_API_KEY from env; per-request "
+        "X-Redmine-API-Key headers are used instead."
     )
 
 
@@ -153,8 +160,8 @@ def _build_legacy_client() -> Redmine:
     else:
         raise RuntimeError(
             "No Redmine authentication available. "
-            "Set REDMINE_AUTH_MODE=oauth or configure REDMINE_API_KEY / "
-            "REDMINE_USERNAME+REDMINE_PASSWORD."
+            "Set REDMINE_AUTH_MODE=oauth or oauth-proxy, or configure "
+            "REDMINE_API_KEY / REDMINE_USERNAME+REDMINE_PASSWORD."
         )
 
 
@@ -183,6 +190,23 @@ def _get_redmine_client() -> Redmine:
                 requests={"headers": headers, **requests_config},
             )
         return g["Redmine"](g["REDMINE_URL"], requests={"headers": headers})
+
+    # legacy-per-user mode: per-request key from the X-Redmine-API-Key header.
+    if g["REDMINE_AUTH_MODE"] == "legacy-per-user":
+        from ._per_user import maybe_log_identity, resolve_per_user_key
+
+        try:
+            request = get_http_request()
+        except RuntimeError:
+            request = None
+        key = resolve_per_user_key(request)  # raises PerUserAuthError
+        requests_config = _build_requests_config()
+        if requests_config:
+            client = g["Redmine"](g["REDMINE_URL"], key=key, requests=requests_config)
+        else:
+            client = g["Redmine"](g["REDMINE_URL"], key=key)
+        maybe_log_identity(client, key)
+        return client
 
     # Legacy mode: reuse a cached singleton.
     if g["_legacy_client"] is None:

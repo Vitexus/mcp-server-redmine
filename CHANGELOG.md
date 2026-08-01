@@ -7,7 +7,168 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Community health files: `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1),
+  `SECURITY.md` (private vulnerability reporting, deployment model, and threat
+  model), and a pull request template. `docs/contributing.md` updated to
+  reference them and to defer the release process to `scripts/release.py`.
 
+## [2.9.0] - 2026-08-01
+### Added
+- Write support for agile sprint and position via `update_redmine_issue`
+  ([#193](https://github.com/jztan/redmine-mcp-server/issues/193)):
+  `agile_sprint_id` (set to `0`/null to remove the issue from its sprint) and
+  `position` may now be set, given either top-level in `fields` or nested under
+  an `agile_data_attributes` dict, routed to the RedmineUP Agile plugin endpoint
+  the same way `story_points` already was. Previously `agile_sprint_id` was
+  silently dropped, so issues could not be moved to/from a sprint through the
+  MCP server. Writes are applied in place — the current `agile_data` row (id and
+  existing values) is carried forward — so changing one agile field never nulls
+  the others. The updated issue is augmented with the resulting `story_points`,
+  `agile_sprint_id`, and `agile_position` so the change can be verified from the
+  response.
+
+### Fixed
+- `update_redmine_issue` no longer accepts an unusable `agile_data_attributes`
+  value in silence. A value that is not an object, or one carrying a key outside
+  the writable agile fields, now returns an error naming what was rejected
+  instead of reporting success for a write that never happened.
+- A failed read of the current `agile_data` row no longer falls back to a write
+  that replaces the row. Only a missing row (HTTP 404) takes the create path;
+  any other error is surfaced, so a transient failure cannot null the agile
+  fields it was unable to read.
+
+### Contributors
+- @knasiotis — reported the dropped `agile_sprint_id` write and implemented
+  agile sprint/position support, including the in-place `agile_data` fix
+  ([#194](https://github.com/jztan/redmine-mcp-server/pull/194))
+
+## [2.8.0] - 2026-07-25
+### Added
+- Opt-in self-AS OAuth discovery profile ([#188](https://github.com/jztan/redmine-mcp-server/issues/188)):
+  set `REDMINE_OAUTH_DISCOVERY_AS=self` so the server advertises itself as the
+  authorization server (issuer = `REDMINE_MCP_BASE_URL`) and serves RFC 8414
+  metadata at its own canonical well-known location, while authorize and token
+  requests still target Redmine `/oauth/*`. Lets clients that probe the
+  authorization server's canonical location (e.g. Cursor) complete OAuth in
+  stock `oauth` mode. Default (`redmine`) behavior is unchanged.
+- Advertise a subset of OAuth scopes in discovery via `REDMINE_MCP_SCOPES`
+  ([#189](https://github.com/jztan/redmine-mcp-server/issues/189)): when the
+  Redmine OAuth Application enables only a subset of permissions, advertising a
+  matching `scopes_supported` avoids `invalid_scope` at consent for clients
+  that request the full advertised list.
+
+### Security
+- OAuth token scopes are now enforced on MCP tool calls ([#185](https://github.com/jztan/redmine-mcp-server/issues/185)):
+  each tool requires the Redmine permission scopes it uses (per-action for
+  `manage_X` tools), unmapped tools are denied by default, `tools/list` is
+  filtered to the token's scopes, and the `admin` scope bypasses the check.
+  Enforcement is on by default; set `REDMINE_OAUTH_SCOPE_ENFORCEMENT=off`
+  as a temporary bridge while re-consenting tokens issued before this
+  release (see docs/oauth-setup.md, "Scope Enforcement"). Reported by
+  @stevehollis-orderflow.
+
+### Contributors
+- @stevehollis-orderflow — reported that OAuth token scopes were advertised but not enforced on tool calls ([#185](https://github.com/jztan/redmine-mcp-server/issues/185)), the Cursor OAuth discovery incompatibility ([#188](https://github.com/jztan/redmine-mcp-server/issues/188)), and the scope-subset gap ([#189](https://github.com/jztan/redmine-mcp-server/issues/189)), each with a precise repro and a sound fix design
+
+## [2.7.0] - 2026-07-20
+### Added
+- Interactive `project-dashboard` MCP App: the new `show_project_dashboard`
+  tool renders a live project snapshot (open vs closed, overdue, due this
+  week, an open-by-priority breakdown, and recent activity) as an
+  interactive dashboard in clients that support the MCP Apps extension,
+  backed by a `ui://` HTML resource over the existing streamable-HTTP
+  transport. Clicking any figure drills into the matching issue list
+  in-panel; a Refresh action re-fetches through the app-callable
+  `get_project_dashboard_data` tool. Read-only.
+- Python 3.14 support: 3.14 is now in the CI test matrix and declared in the
+  package classifiers. The locked `watchfiles` dependency (pulled in via
+  `fastmcp`) was upgraded from 1.0.5 to 1.2.0, the first line with cp314
+  wheels, and two `file_manager` tests that relied on pre-3.14 pathlib
+  internals were rewritten to be version-independent.
+
+### Fixed
+- Docker container now honors `SERVER_HOST` and `SERVER_PORT`. The Dockerfile
+  `CMD` previously hardcoded `--host 0.0.0.0 --port 8000` in the uvicorn
+  invocation, bypassing `main()` and leaving both env vars ineffective in the
+  container. The `CMD` now runs the installed `redmine-mcp-server` console
+  script, which reads both vars, and the `HEALTHCHECK` port follows
+  `${SERVER_PORT:-8000}`. The runtime image also sets `SERVER_HOST=0.0.0.0` as
+  a default so an ad-hoc `docker run` without a full env file still binds to a
+  reachable address (overridable via `env_file` or `-e`).
+
+### Security
+- Raised security floors for two transitive dependencies via `[tool.uv]`
+  `constraint-dependencies`, clearing all known advisories from the audit:
+  `click>=8.3.3` (PYSEC-2026-2132) and `mcp>=1.28.1` (CVE-2026-52870,
+  CVE-2026-52869, CVE-2026-59950). Both are pulled in indirectly and not
+  imported directly; each constraint can be dropped once an upstream dependency
+  raises its own floor.
+
+### Contributors
+- @pdostal — fixed the Dockerfile to respect `SERVER_HOST`/`SERVER_PORT` env vars ([#179](https://github.com/jztan/redmine-mcp-server/pull/179))
+
+## [2.6.0] - 2026-07-11
+### Added
+- Interactive `triage-board` MCP App (Interactive UI / `ext-apps` track): the new
+  `show_triage_board` tool renders a project's issues as a live Kanban board
+  grouped by status inside clients that support the MCP Apps extension, backed
+  by a `ui://` HTML resource served over the existing streamable-HTTP transport,
+  with a Refresh action that re-fetches through the app-callable
+  `get_triage_board_data` tool.
+  Drag a card to another status column to change the issue's status in Redmine via
+  `update_redmine_issue` (an optimistic move that reverts with an explanation when
+  Redmine rejects the transition); disabled in read-only mode. The Kanban board
+  self-loads and auto-resizes to fit. Projects with more status columns than fit the width scroll
+  horizontally with a visible scrollbar, so columns past the third stay reachable.
+- `get_redmine_issue` now serializes ten standard Redmine issue fields its
+  "full context" output previously dropped: `category`, `fixed_version`
+  (target version), `parent`, `start_date`, `due_date`, `done_ratio`,
+  `estimated_hours`, `spent_hours`, `is_private`, and `closed_on`. The same
+  fields are mirrored in the `list_redmine_issues` / `search_redmine_issues`
+  `fields` selector, so they are individually selectable and included in the
+  default all-fields output. Values come off the already-loaded issue object,
+  so no extra Redmine request is made, and each field degrades to `None` when
+  unset. ([#174](https://github.com/jztan/redmine-mcp-server/issues/174))
+- AlphaNodes `additional_tags` plugin support (opt-in via `REDMINE_TAGS_ENABLED`,
+  off by default): `get_redmine_issue` returns a `tags` array (list of
+  `{id, name}`), and `create_redmine_issue` / `update_redmine_issue` accept a
+  `tag_list` (a list of names or a comma-separated string; `[]` clears all
+  tags). The `tag_list` is extracted before custom-field resolution so it never
+  collides with a same-named custom field. Under `oauth` / `oauth-proxy` the
+  `view_issue_tags` read scope (plus `create_issue_tags` / `edit_issue_tags`
+  outside read-only mode) is advertised only when the flag is enabled, and
+  `get_mcp_server_info` reports the `tags` plugin flag. Silently ignored when
+  the flag is off. ([#175](https://github.com/jztan/redmine-mcp-server/issues/175))
+### Fixed
+- `list_redmine_issues` total-count query is now bounded to a single request.
+  When `include_pagination_info=True`, the count query was built without a
+  limit, so python-redmine's ResourceSet materialized every matching issue
+  (chunk-by-chunk, dozens of sequential API requests for a large project) just
+  to read `total_count`, which could exceed the MCP `tools/call` timeout (seen
+  as "tools/call timed out" in the triage board's Kanban view). Redmine returns
+  the full `total_count` in the first page of any filtered response, so the
+  count query now fetches a single issue (`limit=1`) instead of the whole
+  result set.
+- OAuth agile fields under `REDMINE_AGILE_ENABLED`: when the agile feature is
+  enabled, the server now advertises the `view_agile_queries` scope in its
+  OAuth discovery documents so issued tokens can reach
+  `AgileBoardsController#agile_data`. Previously the agile scope was excluded
+  along with other plugin scopes, so `get_redmine_issue` under `oauth` /
+  `oauth-proxy` mode always got a Redmine 403 for agile data (silently
+  swallowed) and never returned `story_points`, `agile_sprint_id`, or
+  `agile_position`. The scope is gated on the same `REDMINE_AGILE_ENABLED`
+  flag, so non-agile deployments never advertise a scope Redmine cannot
+  resolve.
+- Compatibility with fastmcp 3.4.3: the argument-validation middleware now also
+  unwraps fastmcp's own `ValidationError` (which since 3.4.3 wraps the underlying
+  pydantic error as its `__cause__`), so invalid tool arguments keep returning the
+  clean `INVALID_ARGUMENTS` envelope instead of a raw pydantic error dump. Still
+  compatible with earlier fastmcp 3.x releases.
+### Contributors
+- @LaurensRietveld — reported the missing OAuth agile scope and diagnosed the root cause ([#173](https://github.com/jztan/redmine-mcp-server/issues/173)); expanded the full-issue serializer with standard issue fields ([#177](https://github.com/jztan/redmine-mcp-server/pull/177)); and added optional AlphaNodes `additional_tags` plugin support (read + write) ([#178](https://github.com/jztan/redmine-mcp-server/pull/178))
+
+## [2.5.0] - 2026-07-04
 ### Added
 - `create_redmine_issue` and `update_redmine_issue` now accept an `uploads`
   parameter to attach files to an issue (and to a journal note when combined
@@ -941,6 +1102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive authentication support (username/password and API key)
 - Docker containerization support
 
+[2.9.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.9.0
+[2.8.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.8.0
+[2.7.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.7.0
+[2.6.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.6.0
+[2.5.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.5.0
 [2.4.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.4.0
 [2.3.1]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.3.1
 [2.3.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.3.0

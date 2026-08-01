@@ -194,6 +194,82 @@ Set this in Redmine's OAuth app (Step 1) to match your client:
 > **Note on DCR:** Some clients (Claude Desktop, VS Code) expect Dynamic Client Registration. Redmine's Doorkeeper does not support DCR, so you must pre-register the app manually (Step 1) and configure the client with the `client_id`/`client_secret`.
 > Use `REDMINE_AUTH_MODE=oauth-proxy` when MCP clients need DCR/CIMD onboarding.
 
+## Scope Enforcement
+
+The server enforces OAuth scopes per tool (on by default). Every MCP
+tool maps to the Redmine permission scopes it needs, and a
+call is refused with code `INSUFFICIENT_SCOPE` when the access token
+does not carry them. `tools/list` only shows the tools the token can
+use. Tokens with the `admin` scope bypass the check, matching Redmine's
+own semantics.
+
+The authoritative tool-to-scope map is `TOOL_SCOPES` in
+`src/redmine_mcp_server/oauth_scopes.py`.
+
+Notes:
+
+- The map gates each tool's base permission. Argument-conditional
+  permissions (for example `manage_subtasks` when changing
+  `parent_issue_id`, or tag scopes for `tag_list`) are still enforced
+  by Redmine itself.
+- RedmineUP plugin tools (`manage_product`, `manage_contact`,
+  checklists) cannot require plugin scopes because those are not
+  advertised; Redmine enforces its own plugin permissions for them.
+- A notes-only `update_redmine_issue` call (fields containing nothing but
+  `notes` / `private_notes`, no uploads) requires `add_issue_notes` instead
+  of `edit_issues`, mirroring Redmine's own note-adding permission.
+
+### Tokens issued before scope enforcement
+
+Tokens obtained before scopes were requested (or from OAuth apps with a
+blank scope list) introspect with empty scopes and will be denied for
+every tool. Fix: update the OAuth application's scopes in Redmine,
+disconnect and re-authorize the MCP client so a new consent grants the
+scopes. As a temporary bridge you can set:
+
+```bash
+REDMINE_OAUTH_SCOPE_ENFORCEMENT=off
+```
+
+which restores the pre-enforcement behavior (any active token can call
+any tool) and logs a warning at startup. Re-enable it once clients have
+re-consented.
+
+### Cursor and self-AS discovery
+
+Some MCP clients (for example Cursor) discover the authorization server by
+probing its canonical RFC 8414 well-known location. Because stock `oauth`
+mode names Redmine as the authorization server and no released Redmine
+Doorkeeper serves `/.well-known/oauth-authorization-server`, those clients
+fail discovery.
+
+Set `REDMINE_OAUTH_DISCOVERY_AS=self` so this server advertises itself as the
+authorization server (issuer = `REDMINE_MCP_BASE_URL`) and serves the RFC 8414
+document at its own canonical well-known location. Authorize and token
+requests still go directly to Redmine `/oauth/authorize` and `/oauth/token`,
+so the client keeps using its static confidential client registered in
+Redmine. This mode is opt-in; the default `redmine` mode is unchanged.
+
+If the Redmine OAuth Application enables only a subset of permissions, also
+set `REDMINE_MCP_SCOPES` to that subset so the advertised `scopes_supported`
+matches what the Application can grant and consent does not fail with
+`invalid_scope`.
+
+`REDMINE_MCP_SCOPES` is a subset of the scopes this server already advertises
+(the Redmine permissions its tools actually use), not a mirror of the
+Application's full permission list. Permissions your Application grants but no
+MCP tool uses (for example `view_gantt`, `copy_issues`, `edit_own_time_entries`)
+are not in that set and are rejected at boot; leave them out of
+`REDMINE_MCP_SCOPES`. The boot error lists the full set of accepted scopes.
+
+Note: `REDMINE_OAUTH_DISCOVERY_AS` and `REDMINE_MCP_SCOPES` apply to `oauth`
+mode only and are ignored in `oauth-proxy` mode, where this server is the
+authorization-server gateway.
+
+The `oauth-proxy` mode is a different model (this server proxies authorize and
+token and issues its own client registrations); it is the alternative when you
+want a full authorization-server gateway rather than direct-to-Redmine consent.
+
 ## Migrating from Legacy Mode
 
 1. Set `REDMINE_AUTH_MODE=oauth` and restart — no downtime needed

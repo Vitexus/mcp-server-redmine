@@ -19,6 +19,11 @@ def _is_agile_enabled() -> bool:
     return _is_true_env("REDMINE_AGILE_ENABLED", "false")
 
 
+def _is_tags_enabled() -> bool:
+    """Check if AlphaNodes additional_tags plugin support is enabled."""
+    return _is_true_env("REDMINE_TAGS_ENABLED", "false")
+
+
 def _is_checklists_enabled() -> bool:
     """Check if RedmineUP Checklists plugin support is enabled."""
     return _is_true_env("REDMINE_CHECKLISTS_ENABLED", "false")
@@ -37,6 +42,33 @@ def _is_crm_enabled() -> bool:
 def _is_dmsf_enabled() -> bool:
     """Check if DMSF (document management) plugin support is enabled."""
     return _is_true_env("REDMINE_DMSF_ENABLED", "false")
+
+
+def _is_scope_enforcement_enabled() -> bool:
+    """Check if per-tool OAuth scope enforcement is enabled (#185).
+
+    Default on. Set REDMINE_OAUTH_SCOPE_ENFORCEMENT=off to restore the
+    pre-enforcement behavior (any active token can call any tool) while
+    users re-consent tokens with the required scopes.
+    """
+    return _is_true_env("REDMINE_OAUTH_SCOPE_ENFORCEMENT", "true")
+
+
+def _oauth_discovery_as() -> str:
+    """Select the OAuth discovery profile (#188).
+
+    ``redmine`` (default): advertise Redmine as the authorization server
+    (issuer = REDMINE_URL), the post-#140 behavior. ``self``: advertise this
+    MCP server as the authorization server (issuer = REDMINE_MCP_BASE_URL)
+    while authorize/token stay on Redmine /oauth/*, for clients that probe the
+    authorization server's canonical well-known location (e.g. Cursor).
+    """
+    value = os.getenv("REDMINE_OAUTH_DISCOVERY_AS", "redmine").strip().lower()
+    if value not in {"redmine", "self"}:
+        raise RuntimeError(
+            "REDMINE_OAUTH_DISCOVERY_AS must be 'redmine' or 'self', " f"got '{value}'."
+        )
+    return value
 
 
 def _admin_tools_enabled() -> bool:

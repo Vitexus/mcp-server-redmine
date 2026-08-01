@@ -25,9 +25,13 @@ RUN uv venv /opt/venv && \
 FROM python:3.13-slim AS runtime
 
 # Set environment variables
+# SERVER_HOST/SERVER_PORT default to a reachable binding so ad-hoc
+# `docker run` works without a full env file; override via env_file or -e.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    SERVER_HOST=0.0.0.0 \
+    SERVER_PORT=8000
 
 # Install system dependencies
 RUN apt-get update && \
@@ -59,10 +63,10 @@ USER appuser
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:${SERVER_PORT:-8000}/health || exit 1
 
-# Expose port
+# Expose default port (informational only; override with SERVER_PORT env var)
 EXPOSE 8000
 
 # Default command
-CMD ["python", "-m", "uvicorn", "src.redmine_mcp_server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["redmine-mcp-server"]

@@ -22,7 +22,7 @@ from .._custom_fields import (
     _parse_optional_object_payload,
 )
 from .._decorators import ActionMode, action_dispatch
-from .._env import _is_agile_enabled, _is_read_only_mode
+from .._env import _is_agile_enabled, _is_read_only_mode, _is_tags_enabled
 from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
 from .._serialization import (
     _attachment_to_dict,
@@ -49,10 +49,17 @@ _VALID_ISSUE_RELATION_TYPES: Set[str] = {
 }
 
 
-def _fetch_agile_data(issue_id: int) -> Dict[str, Any]:
-    """Fetch agile fields for an issue from the RedmineUP Agile endpoint.
+# RedmineUP Agile fields writable through ``update_redmine_issue``. The plugin
+# stores the third as ``position``; ``agile_position`` is the alias it is read
+# back under and is accepted on the write path too.
+_WRITABLE_AGILE_KEYS = ("story_points", "agile_sprint_id", "position", "agile_position")
 
-    Returns a dict with story_points, agile_sprint_id, and agile_position.
+
+def _fetch_agile_data_raw(issue_id: int) -> Dict[str, Any]:
+    """Fetch the raw RedmineUP ``agile_data`` record for an issue.
+
+    Returns the plugin's ``agile_data`` object verbatim — including its ``id``
+    and ``position`` — or an empty dict when the issue has no agile_data.
     Raises on any HTTP error (caller is responsible for catching).
     """
     # Lazy lookup so tests patching
@@ -62,7 +69,16 @@ def _fetch_agile_data(issue_id: int) -> Dict[str, Any]:
     client = _get_redmine_client()
     url = f"{_client.REDMINE_URL}/issues/{issue_id}/agile_data.json"
     payload = client.engine.request("get", url)
-    agile_data = payload.get("agile_data", {}) or {}
+    return payload.get("agile_data", {}) or {}
+
+
+def _fetch_agile_data(issue_id: int) -> Dict[str, Any]:
+    """Fetch agile fields for an issue from the RedmineUP Agile endpoint.
+
+    Returns a dict with story_points, agile_sprint_id, and agile_position.
+    Raises on any HTTP error (caller is responsible for catching).
+    """
+    agile_data = _fetch_agile_data_raw(issue_id)
     return {
         "story_points": agile_data.get("story_points"),
         "agile_sprint_id": agile_data.get("agile_sprint_id"),
@@ -70,26 +86,86 @@ def _fetch_agile_data(issue_id: int) -> Dict[str, Any]:
     }
 
 
-def _apply_agile_story_points(issue_id: int, story_points) -> None:
-    """Write story_points for an issue via the RedmineUP Agile endpoint.
+def _apply_agile_data(issue_id: int, agile_attrs: Dict[str, Any]) -> None:
+    """Write agile fields for an issue via the RedmineUP Agile endpoint.
 
-    Raises on any HTTP error (caller is responsible for catching).
+    ``agile_attrs`` may contain any of the plugin's writable keys —
+    ``story_points``, ``agile_sprint_id``, and ``position``. python-redmine's
+    core ``issue.update`` does not understand ``agile_data_attributes``, so these
+    must be sent to the plugin directly here rather than through the standard
+    update path.
+
+    The plugin declares ``accepts_nested_attributes_for :agile_data`` without
+    ``update_only: true``, so a nested payload that omits the existing row's
+    ``id`` *replaces* the agile_data row and nulls every field not included. To
+    update in place, this first reads the current row and carries its ``id`` and
+    existing values forward, then overlays the requested changes — so setting one
+    field (e.g. the sprint) never wipes the others. An explicit ``None``/``0`` in
+    ``agile_attrs`` still clears its field, since requested values take priority.
+
+    Raises on any HTTP error from the write (caller is responsible for catching).
     """
     # Lazy lookup so tests patching
     # `_client.REDMINE_URL` are observed at call time.
     from .. import _client
 
     client = _get_redmine_client()
+
+    # Read the current row so the write updates in place instead of replacing it.
+    # A 404 means there is no agile_data row (or no such endpoint) and therefore
+    # nothing to preserve, so fall back to a plain create. Any other failure is
+    # left to propagate: without the current row the write below would be the
+    # id-less payload that replaces the record, and we would be nulling fields we
+    # never managed to read.
+    try:
+        current = _fetch_agile_data_raw(issue_id)
+    except ResourceNotFoundError:
+        current = {}
+
+    attrs: Dict[str, Any] = {}
+    row_id = current.get("id")
+    if row_id is not None:
+        attrs["id"] = row_id
+    for key in ("story_points", "agile_sprint_id", "position"):
+        value = current.get(key)
+        if value is not None:
+            attrs[key] = value
+    attrs.update(agile_attrs)  # requested changes win (incl. explicit None/0)
+
     url = f"{_client.REDMINE_URL}/issues/{issue_id}.json"
-    payload = json.dumps(
-        {"issue": {"agile_data_attributes": {"story_points": story_points}}}
-    )
+    payload = json.dumps({"issue": {"agile_data_attributes": attrs}})
     client.engine.request(
         "put",
         url,
         headers={"Content-Type": "application/json"},
         data=payload,
     )
+
+
+def _apply_agile_story_points(issue_id: int, story_points) -> None:
+    """Write story_points for an issue via the RedmineUP Agile endpoint.
+
+    Thin back-compat wrapper around :func:`_apply_agile_data`.
+
+    Raises on any HTTP error (caller is responsible for catching).
+    """
+    _apply_agile_data(issue_id, {"story_points": story_points})
+
+
+def _augment_with_agile_data(issue_id: int, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge RedmineUP Agile fields into a serialized issue dict.
+
+    Adds ``story_points``, ``agile_sprint_id``, and ``agile_position`` so callers
+    can read back agile state (e.g. confirm a sprint move) from the same response.
+    A no-op when the Agile plugin is disabled, and silently omits the fields on
+    any fetch failure — same best-effort contract as ``get_redmine_issue``.
+    """
+    if _is_agile_enabled():
+        try:
+            result.update(_fetch_agile_data(issue_id))
+        except Exception:
+            pass  # Silently omit agile fields on any failure
+    return result
 
 
 def _custom_fields_to_list(issue: Any) -> List[Dict[str, Any]]:
@@ -123,6 +199,67 @@ def _custom_fields_to_list(issue: Any) -> List[Dict[str, Any]]:
         )
 
     return custom_fields
+
+
+def _issue_tags_to_list(issue: Any) -> List[Dict[str, Any]]:
+    """Convert the AlphaNodes additional_tags ``tags`` array to a list.
+
+    The plugin injects a ``tags`` array into the single-issue API response
+    (``GET /issues/{id}.json``) when its ``active_issue_tags`` setting is on
+    and the caller holds ``view_issue_tags`` on the project. Entries look like
+    ``{"id": 3, "name": "fast-track"}``, but the plugin only emits ``id`` when
+    the issue's (sorted) ``tag_list`` exactly matches its tag records — so in
+    practice many responses are name-only (``{"name": "fast-track"}``). This
+    normalizes both to ``{"id", "name"}`` with ``id`` set to ``None`` when the
+    plugin omitted it; ``name`` is always the stable identifier.
+
+    Returns an empty list when the attribute is absent — which is also what a
+    caller lacking ``view_issue_tags`` sees, since the plugin then omits the
+    field entirely.
+    """
+    raw_tags = getattr(issue, "tags", None)
+    if not raw_tags:
+        return []
+
+    try:
+        iterator = iter(raw_tags)
+    except TypeError:
+        return []
+
+    tags: List[Dict[str, Any]] = []
+    for tag in iterator:
+        if isinstance(tag, dict):
+            tags.append({"id": tag.get("id"), "name": tag.get("name")})
+        else:
+            tags.append(
+                {"id": getattr(tag, "id", None), "name": getattr(tag, "name", None)}
+            )
+    return tags
+
+
+def _normalize_tag_list(value: Any) -> List[str]:
+    """Coerce a caller-supplied ``tag_list`` into a list of tag-name strings.
+
+    Accepts a list/tuple of names, a single comma-separated string, or
+    ``None`` (which clears all tags). Names are stripped and blanks dropped.
+    A comma-separated string is split into multiple tags, mirroring the
+    additional_tags plugin's own delimiter; Redmine's ``Array(tag_list)``
+    would otherwise treat ``"a,b"`` as one tag named ``"a,b"``.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts: Any = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = value
+    else:
+        parts = [value]
+    result: List[str] = []
+    for part in parts:
+        name = str(part).strip()
+        if name:
+            result.append(name)
+    return result
 
 
 # Fields that Redmine's /search.json endpoint actually populates.
@@ -207,6 +344,9 @@ def _issue_to_dict(issue: Any, include_custom_fields: bool = False) -> Dict[str,
     priority = getattr(issue, "priority", None)
     author = getattr(issue, "author", None)
     tracker = getattr(issue, "tracker", None)
+    category = getattr(issue, "category", None)
+    fixed_version = getattr(issue, "fixed_version", None)
+    parent = getattr(issue, "parent", None)
 
     issue_dict = {
         "id": getattr(issue, "id", None),
@@ -235,6 +375,25 @@ def _issue_to_dict(issue: Any, include_custom_fields: bool = False) -> Dict[str,
             if assigned is not None
             else None
         ),
+        # Standard fields returned by Redmine's default issue JSON.
+        # The sibling gantt serializer already exposes a subset of these.
+        # see GitHub issue #174.
+        "category": (
+            {"id": category.id, "name": category.name} if category is not None else None
+        ),
+        "fixed_version": (
+            {"id": fixed_version.id, "name": fixed_version.name}
+            if fixed_version is not None
+            else None
+        ),
+        "parent": ({"id": parent.id} if parent is not None else None),
+        "start_date": _safe_isoformat(getattr(issue, "start_date", None)),
+        "due_date": _safe_isoformat(getattr(issue, "due_date", None)),
+        "done_ratio": getattr(issue, "done_ratio", None),
+        "estimated_hours": getattr(issue, "estimated_hours", None),
+        "spent_hours": getattr(issue, "spent_hours", None),
+        "is_private": getattr(issue, "is_private", None),
+        "closed_on": _safe_isoformat(getattr(issue, "closed_on", None)),
         "created_on": _safe_isoformat(getattr(issue, "created_on", None)),
         "updated_on": _safe_isoformat(getattr(issue, "updated_on", None)),
     }
@@ -266,6 +425,16 @@ def _issue_to_dict_selective(
         - tracker: Tracker/type info (dict with id and name, or None)
         - author: Author info (dict with id and name)
         - assigned_to: Assigned user info (dict with id and name, or None)
+        - category: Issue category (dict with id and name, or None)
+        - fixed_version: Target version (dict with id and name, or None)
+        - parent: Parent issue (dict with id, or None)
+        - start_date: Scheduled start date (ISO format, or None)
+        - due_date: Scheduled due date (ISO format, or None)
+        - done_ratio: Completion percentage (int, or None)
+        - estimated_hours: Estimated effort in hours (float, or None)
+        - spent_hours: Logged effort in hours (float, or None)
+        - is_private: Whether the issue is private (bool, or None)
+        - closed_on: Closure timestamp (ISO format, or None)
         - created_on: Creation timestamp (ISO format)
         - updated_on: Last update timestamp (ISO format)
 
@@ -294,6 +463,9 @@ def _issue_to_dict_selective(
     priority = getattr(issue, "priority", None)
     author = getattr(issue, "author", None)
     tracker = getattr(issue, "tracker", None)
+    category = getattr(issue, "category", None)
+    fixed_version = getattr(issue, "fixed_version", None)
+    parent = getattr(issue, "parent", None)
 
     all_fields = {
         "id": getattr(issue, "id", None),
@@ -322,6 +494,22 @@ def _issue_to_dict_selective(
             if assigned is not None
             else None
         ),
+        "category": (
+            {"id": category.id, "name": category.name} if category is not None else None
+        ),
+        "fixed_version": (
+            {"id": fixed_version.id, "name": fixed_version.name}
+            if fixed_version is not None
+            else None
+        ),
+        "parent": ({"id": parent.id} if parent is not None else None),
+        "start_date": _safe_isoformat(getattr(issue, "start_date", None)),
+        "due_date": _safe_isoformat(getattr(issue, "due_date", None)),
+        "done_ratio": getattr(issue, "done_ratio", None),
+        "estimated_hours": getattr(issue, "estimated_hours", None),
+        "spent_hours": getattr(issue, "spent_hours", None),
+        "is_private": getattr(issue, "is_private", None),
+        "closed_on": _safe_isoformat(getattr(issue, "closed_on", None)),
         "created_on": _safe_isoformat(getattr(issue, "created_on", None)),
         "updated_on": _safe_isoformat(getattr(issue, "updated_on", None)),
     }
@@ -541,7 +729,11 @@ async def get_redmine_issue(
             ``journal_limit``). Defaults to ``0``.
 
     Returns:
-        A dictionary containing issue details. If ``include_journals`` is ``True``
+        A dictionary containing issue details, including the standard fields
+        ``category``, ``fixed_version`` (target version), ``parent``,
+        ``start_date``, ``due_date``, ``done_ratio``, ``estimated_hours``,
+        ``spent_hours``, ``is_private`` and ``closed_on`` (each ``None`` when
+        not set on the issue). If ``include_journals`` is ``True``
         and the issue has journals, they will be returned under the ``"journals"``
         key. If ``include_attachments`` is ``True`` and attachments exist they
         will be returned under the ``"attachments"`` key. On failure a dictionary
@@ -550,6 +742,10 @@ async def get_redmine_issue(
         ``story_points``, ``agile_sprint_id``, and ``agile_position``
         fetched from the RedmineUP Agile plugin endpoint (omitted
         silently on any failure).
+        When ``REDMINE_TAGS_ENABLED=true``, the result also includes a
+        ``tags`` array (``[{"id", "name"}, ...]``) from the AlphaNodes
+        additional_tags plugin. It is empty when the issue has no tags or
+        the caller lacks the ``view_issue_tags`` permission.
     """
 
     # Ensure cleanup task is started (lazy initialization)
@@ -624,12 +820,10 @@ async def get_redmine_issue(
                 for c in raw
             ]
 
-        if _is_agile_enabled():
-            try:
-                agile = _fetch_agile_data(issue_id)
-                result.update(agile)
-            except Exception:
-                pass  # Silently omit agile fields on any failure
+        if _is_tags_enabled():
+            result["tags"] = _issue_tags_to_list(issue)
+
+        result = _augment_with_agile_data(issue_id, result)
 
         return result
     except Exception as e:
@@ -824,13 +1018,19 @@ async def list_redmine_issues(
 
         # Handle metadata response format
         if include_pagination_info:
-            # Get total count from a separate query without offset/limit
+            # Get total count from a separate query.
             try:
-                # Create clean query for total count (no pagination parameters)
-                count_filters = {**filters}
+                # Redmine returns the full ``total_count`` in the first page of
+                # any filtered response, so we only need to fetch a single
+                # issue to read it. Omitting the limit here would make
+                # python-redmine's ResourceSet materialize *every* matching
+                # issue (chunk-by-chunk, dozens of sequential requests for a
+                # large project) just to compute the count, which can exceed
+                # the MCP ``tools/call`` timeout.
+                count_filters = {**filters, "limit": 1, "offset": 0}
                 count_query = _get_redmine_client().issue.filter(**count_filters)
-                # Must evaluate the query first to get accurate total_count
-                list(count_query)  # Trigger evaluation
+                # Trigger a single request so total_count is populated.
+                list(count_query)
                 total_count = count_query.total_count
                 logging.debug(f"Got total count from separate query: {total_count}")
             except Exception as e:
@@ -1098,6 +1298,11 @@ async def create_redmine_issue(
       relevant validation errors on required custom fields (e.g. blank/invalid)
       and
       ``REDMINE_AUTOFILL_REQUIRED_CUSTOM_FIELDS=true``.
+    - When ``REDMINE_TAGS_ENABLED=true``, a ``tag_list`` key in ``fields``
+      (list of names or comma-separated string) sets AlphaNodes
+      additional_tags tags on the new issue. Requires the
+      ``create_issue_tags``/``edit_issue_tags`` permission; silently ignored
+      when the feature is disabled (default).
     """
 
     if _is_read_only_mode():
@@ -1138,6 +1343,18 @@ async def create_redmine_issue(
         if upload_error is not None:
             return upload_error
 
+    # Extract tag_list (additional_tags plugin) before custom-field resolution
+    # so it is never mistaken for a same-named custom field. Dropped silently
+    # when the feature is disabled, mirroring the agile story_points handling.
+    tag_list = None
+    tags_create_needed = False
+    if _is_tags_enabled():
+        if "tag_list" in issue_fields:
+            tag_list = _normalize_tag_list(issue_fields.pop("tag_list"))
+            tags_create_needed = True
+    else:
+        issue_fields.pop("tag_list", None)
+
     # Resolve name-keyed custom fields (e.g. fields={"Department": "..."})
     # to id-keyed custom_fields entries Redmine expects. See #123 for
     # the cross-tool parity rationale.
@@ -1148,6 +1365,8 @@ async def create_redmine_issue(
 
     try:
         create_kwargs = dict(issue_fields)
+        if tags_create_needed:
+            create_kwargs["tag_list"] = tag_list
         if upload_descriptors:
             create_kwargs["uploads"] = upload_descriptors
         issue = _get_redmine_client().issue.create(
@@ -1195,6 +1414,8 @@ async def create_redmine_issue(
                 missing_names,
             )
             retry_create_kwargs = dict(retry_fields)
+            if tags_create_needed:
+                retry_create_kwargs["tag_list"] = tag_list
             if upload_descriptors:
                 retry_create_kwargs["uploads"] = upload_descriptors
             issue = _get_redmine_client().issue.create(
@@ -1263,11 +1484,25 @@ async def update_redmine_issue(
     provided in ``fields``. When present and ``status_id`` is not supplied, the
     function will look up the corresponding status ID and use it for the update.
 
-    When ``REDMINE_AGILE_ENABLED=true``, a ``story_points`` key may also be
-    provided in ``fields``; it is routed to the RedmineUP Agile plugin endpoint
-    separately and is not passed to the standard Redmine update. When
-    ``REDMINE_AGILE_ENABLED=false`` (default), ``story_points`` is silently
-    ignored.
+    When ``REDMINE_AGILE_ENABLED=true``, RedmineUP Agile fields may also be set:
+    ``story_points``, ``agile_sprint_id`` (set to ``0``/null to remove the issue
+    from its sprint), and ``position`` (also accepted as ``agile_position``). Each
+    may be given top-level in ``fields`` or nested under an ``agile_data_attributes``
+    dict. They are routed to the Agile plugin endpoint separately rather than
+    through the standard Redmine update; untouched agile fields are preserved (the
+    update happens in place, so setting only the sprint does not clear
+    ``story_points``/``position``). The returned issue is augmented with the
+    resulting ``story_points``, ``agile_sprint_id``, and ``agile_position`` so the
+    change can be verified from the response. When ``REDMINE_AGILE_ENABLED=false``
+    (default), these agile keys are silently ignored.
+
+    When ``REDMINE_TAGS_ENABLED=true``, a ``tag_list`` key may be provided in
+    ``fields`` to set the issue's AlphaNodes additional_tags tags. Accepts a
+    list of tag names or a comma-separated string; ``[]`` clears all tags. It
+    is handled before custom-field resolution so it is never mistaken for a
+    same-named custom field, and requires the ``create_issue_tags`` (new tags)
+    or ``edit_issue_tags`` (existing tags only) permission. When
+    ``REDMINE_TAGS_ENABLED=false`` (default), ``tag_list`` is silently ignored.
 
     Non-standard keys in ``fields`` are treated as candidate custom-field names.
     When a matching project custom field is found, it is translated into
@@ -1293,17 +1528,67 @@ async def update_redmine_issue(
 
     update_fields = dict(fields)
 
-    # Extract agile fields — not understood by python-redmine.
-    # Use explicit key presence check so story_points=None (clear) still triggers
-    # the agile endpoint (story_points is not None would skip it).
-    story_points = None
-    agile_update_needed = False
+    # Extract agile fields — python-redmine's core update does not understand
+    # ``agile_data_attributes``, so they must be routed to the RedmineUP Agile
+    # plugin endpoint separately. Each writable field may be given either
+    # top-level (like ``story_points``) or nested under an ``agile_data_attributes``
+    # dict; the nested form mirrors the raw plugin payload. The writable fields are
+    # ``story_points``, ``agile_sprint_id`` (sprint / board membership; ``0``/null
+    # removes the issue from its sprint), and ``position`` (read back as
+    # ``agile_position``, accepted under either name). Explicit key-presence checks
+    # so a null/0 value still triggers the write, and ``_apply_agile_data`` carries
+    # untouched fields forward so a subset update never nulls the rest.
+    agile_attrs: Dict[str, Any] = {}
     if _is_agile_enabled():
-        if "story_points" in update_fields:
-            story_points = update_fields.pop("story_points")
-            agile_update_needed = True
+        nested = update_fields.pop("agile_data_attributes", None)
+        sources = [update_fields]
+        if nested is not None:
+            # Reject unusable nested payloads rather than dropping them. A
+            # silently ignored write is the failure mode #193 reported: the tool
+            # reports success while nothing changed.
+            if not isinstance(nested, dict):
+                return {
+                    "error": (
+                        "'agile_data_attributes' must be an object, got "
+                        f"{type(nested).__name__}. Example: "
+                        '{"agile_data_attributes": {"agile_sprint_id": 5}}'
+                    )
+                }
+            unknown = [k for k in nested if k not in _WRITABLE_AGILE_KEYS]
+            if unknown:
+                return {
+                    "error": (
+                        "Unknown key(s) in 'agile_data_attributes': "
+                        f"{', '.join(sorted(unknown))}. Writable agile fields "
+                        f"are: {', '.join(_WRITABLE_AGILE_KEYS)}."
+                    )
+                }
+            sources.append(nested)
+        for source in sources:
+            for key in _WRITABLE_AGILE_KEYS:
+                if key in source:
+                    value = source[key] if source is nested else source.pop(key)
+                    # ``agile_position`` is the read alias; the plugin writes
+                    # ``position``.
+                    write_key = "position" if key == "agile_position" else key
+                    agile_attrs[write_key] = value
     else:
-        update_fields.pop("story_points", None)
+        for key in _WRITABLE_AGILE_KEYS:
+            update_fields.pop(key, None)
+        update_fields.pop("agile_data_attributes", None)
+    agile_update_needed = bool(agile_attrs)
+
+    # Extract tag_list (additional_tags plugin) before custom-field resolution
+    # so it is never mistaken for a same-named custom field. Explicit key
+    # presence check so tag_list=[] (clear all tags) still triggers the update.
+    tag_list = None
+    tags_update_needed = False
+    if _is_tags_enabled():
+        if "tag_list" in update_fields:
+            tag_list = _normalize_tag_list(update_fields.pop("tag_list"))
+            tags_update_needed = True
+    else:
+        update_fields.pop("tag_list", None)
 
     # Convert status name to id if requested
     if "status_name" in update_fields and "status_id" not in update_fields:
@@ -1318,31 +1603,39 @@ async def update_redmine_issue(
             logger.warning(f"Error resolving status name '{name}': {e}")
 
     try:
-        if update_fields or upload_descriptors:
+        if update_fields or upload_descriptors or tags_update_needed:
             update_fields = _map_named_custom_fields_for_update(issue_id, update_fields)
             update_kwargs = dict(update_fields)
+            if tags_update_needed:
+                update_kwargs["tag_list"] = tag_list
             if upload_descriptors:
                 update_kwargs["uploads"] = upload_descriptors
             _get_redmine_client().issue.update(issue_id, **update_kwargs)
         if agile_update_needed:
             try:
-                _apply_agile_story_points(issue_id, story_points)
+                _apply_agile_data(issue_id, agile_attrs)
             except Exception as agile_e:
                 return _handle_redmine_error(
                     agile_e,
-                    f"updating agile story_points for issue {issue_id}",
+                    f"updating agile fields for issue {issue_id}",
                     {"resource_type": "issue", "resource_id": issue_id},
                 )
         if upload_descriptors:
             updated_issue = _get_redmine_client().issue.get(
                 issue_id, include="attachments,journals"
             )
-            return _augment_with_upload_result(
+            result = _augment_with_upload_result(
                 _issue_to_dict(updated_issue, include_custom_fields=True),
                 updated_issue,
             )
+            if agile_update_needed:
+                result = _augment_with_agile_data(issue_id, result)
+            return result
         updated_issue = _get_redmine_client().issue.get(issue_id)
-        return _issue_to_dict(updated_issue, include_custom_fields=True)
+        result = _issue_to_dict(updated_issue, include_custom_fields=True)
+        if agile_update_needed:
+            result = _augment_with_agile_data(issue_id, result)
+        return result
     except ValidationError as e:
         if not _is_required_custom_field_autofill_enabled():
             return _augment_validation_error_with_field_hint(
@@ -1401,28 +1694,36 @@ async def update_redmine_issue(
                 missing_names,
             )
             retry_kwargs = dict(retry_fields)
+            if tags_update_needed:
+                retry_kwargs["tag_list"] = tag_list
             if upload_descriptors:
                 retry_kwargs["uploads"] = upload_descriptors
             _get_redmine_client().issue.update(issue_id, **retry_kwargs)
             if agile_update_needed:
                 try:
-                    _apply_agile_story_points(issue_id, story_points)
+                    _apply_agile_data(issue_id, agile_attrs)
                 except Exception as agile_e:
                     return _handle_redmine_error(
                         agile_e,
-                        f"updating agile story_points for issue {issue_id}",
+                        f"updating agile fields for issue {issue_id}",
                         {"resource_type": "issue", "resource_id": issue_id},
                     )
             if upload_descriptors:
                 updated_issue = _get_redmine_client().issue.get(
                     issue_id, include="attachments,journals"
                 )
-                return _augment_with_upload_result(
+                result = _augment_with_upload_result(
                     _issue_to_dict(updated_issue, include_custom_fields=True),
                     updated_issue,
                 )
+                if agile_update_needed:
+                    result = _augment_with_agile_data(issue_id, result)
+                return result
             updated_issue = _get_redmine_client().issue.get(issue_id)
-            return _issue_to_dict(updated_issue, include_custom_fields=True)
+            result = _issue_to_dict(updated_issue, include_custom_fields=True)
+            if agile_update_needed:
+                result = _augment_with_agile_data(issue_id, result)
+            return result
         except Exception as retry_error:
             return _augment_validation_error_with_field_hint(
                 _handle_redmine_error(

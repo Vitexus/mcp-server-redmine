@@ -141,13 +141,15 @@ class TestAdvertisedScopes:
         for s in READ_SCOPES:
             assert s in result, f"missing read scope {s}"
 
-    def test_includes_write_scopes_by_default(self, monkeypatch):
+    def test_excludes_write_scopes_by_default(self, monkeypatch):
+        # Fail-closed: REDMINE_MCP_READ_ONLY defaults to true, so write
+        # scopes must not be advertised when the env var is unset.
         monkeypatch.delenv("REDMINE_MCP_READ_ONLY", raising=False)
         from redmine_mcp_server.oauth_scopes import WRITE_SCOPES, advertised_scopes
 
         result = advertised_scopes()
         for s in WRITE_SCOPES:
-            assert s in result, f"missing write scope {s}"
+            assert s not in result, f"write scope {s} leaked with REDMINE_MCP_READ_ONLY unset"
 
     @pytest.mark.parametrize(
         "value",
@@ -248,7 +250,7 @@ class TestAdvertisedScopes:
         assert "view_issue_tags" in advertised_scopes()
 
     def test_includes_tags_write_scopes_when_enabled_not_read_only(self, monkeypatch):
-        monkeypatch.delenv("REDMINE_MCP_READ_ONLY", raising=False)
+        monkeypatch.setenv("REDMINE_MCP_READ_ONLY", "false")
         monkeypatch.setenv("REDMINE_TAGS_ENABLED", "true")
         from redmine_mcp_server.oauth_scopes import advertised_scopes
 

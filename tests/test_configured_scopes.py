@@ -13,6 +13,11 @@ def _reload_scopes(monkeypatch, **env):
         "REDMINE_TAGS_ENABLED",
     ):
         monkeypatch.delenv(key, raising=False)
+    # REDMINE_MCP_READ_ONLY defaults to true (fail-closed) in the app itself;
+    # this test file is about REDMINE_MCP_SCOPES subsetting, not read-only
+    # gating, so give it the "full catalogue" baseline it was written against
+    # unless a caller explicitly overrides it below.
+    monkeypatch.setenv("REDMINE_MCP_READ_ONLY", "false")
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     from redmine_mcp_server import oauth_scopes

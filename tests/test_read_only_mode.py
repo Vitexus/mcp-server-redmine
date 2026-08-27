@@ -40,9 +40,9 @@ class TestIsReadOnlyMode:
         with patch.dict(os.environ, {"REDMINE_MCP_READ_ONLY": "false"}):
             assert _is_read_only_mode() is False
 
-    def test_false_when_env_unset(self):
+    def test_true_when_env_unset(self):
         with patch.dict(os.environ, {}, clear=True):
-            assert _is_read_only_mode() is False
+            assert _is_read_only_mode() is True
 
 
 class TestWriteToolsBlockedInReadOnly:
@@ -54,6 +54,19 @@ class TestWriteToolsBlockedInReadOnly:
     @patch("redmine_mcp_server._client.redmine")
     async def test_create_issue_blocked(self, mock_redmine, mock_cleanup):
         result = await create_redmine_issue(project_id=1, subject="X")
+        assert "read-only" in result["error"].lower()
+        mock_redmine.issue.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("redmine_mcp_server._cleanup._ensure_cleanup_started")
+    @patch("redmine_mcp_server._client.redmine")
+    async def test_create_issue_blocked_when_unset(self, mock_redmine, mock_cleanup):
+        # Fail-closed: with the env var completely absent, writes must still
+        # be blocked (this is the production default).
+        env = os.environ.copy()
+        env.pop("REDMINE_MCP_READ_ONLY", None)
+        with patch.dict(os.environ, env, clear=True):
+            result = await create_redmine_issue(project_id=1, subject="X")
         assert "read-only" in result["error"].lower()
         mock_redmine.issue.create.assert_not_called()
 
@@ -191,29 +204,26 @@ class TestWriteToolsWorkWhenNotReadOnly:
         mock_redmine.issue.create.assert_called_once()
 
     @pytest.mark.asyncio
+    @patch.dict(os.environ, {"REDMINE_MCP_READ_ONLY": "false"})
     @patch("redmine_mcp_server._cleanup._ensure_cleanup_started")
     @patch("redmine_mcp_server._client.redmine")
-    async def test_update_issue_proceeds_unset(self, mock_redmine, mock_cleanup):
-        # Ensure env var is absent
-        env = os.environ.copy()
-        env.pop("REDMINE_MCP_READ_ONLY", None)
-        with patch.dict(os.environ, env, clear=True):
-            mock_redmine.issue.update.return_value = True
-            mock_redmine.issue.get.return_value = Mock(
-                id=1,
-                subject="X",
-                description="",
-                project=Mock(id=1, name="P"),
-                status=Mock(id=1, name="New"),
-                priority=Mock(id=2, name="Normal"),
-                author=Mock(id=1, name="A"),
-                assigned_to=None,
-                created_on=None,
-                updated_on=None,
-            )
+    async def test_update_issue_proceeds_when_explicitly_disabled(self, mock_redmine, mock_cleanup):
+        mock_redmine.issue.update.return_value = True
+        mock_redmine.issue.get.return_value = Mock(
+            id=1,
+            subject="X",
+            description="",
+            project=Mock(id=1, name="P"),
+            status=Mock(id=1, name="New"),
+            priority=Mock(id=2, name="Normal"),
+            author=Mock(id=1, name="A"),
+            assigned_to=None,
+            created_on=None,
+            updated_on=None,
+        )
 
-            await update_redmine_issue(issue_id=1, fields={"subject": "X"})
-            mock_redmine.issue.update.assert_called_once()
+        await update_redmine_issue(issue_id=1, fields={"subject": "X"})
+        mock_redmine.issue.update.assert_called_once()
 
     @pytest.mark.asyncio
     @patch.dict(os.environ, {"REDMINE_MCP_READ_ONLY": "true"})

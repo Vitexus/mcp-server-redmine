@@ -45,6 +45,14 @@ if not _integration_run():
     ):
         os.environ[_var] = ""
 
+    # REDMINE_MCP_READ_ONLY now defaults to true (fail-closed) in the app
+    # itself; almost every unit test in this suite exercises a write-tool's
+    # business logic against mocks and expects it to run, not be blocked.
+    # Set the test-suite baseline to "false" here so those tests keep
+    # exercising real behavior; tests/test_read_only_mode.py explicitly
+    # overrides this per-test (via patch.dict) to test the guard itself.
+    os.environ.setdefault("REDMINE_MCP_READ_ONLY", "false")
+
 
 def pytest_configure(config):
     """Configure pytest with custom markers."""

@@ -10,8 +10,12 @@ def _is_true_env(var_name: str, default: str = "false") -> bool:
 
 
 def _is_read_only_mode() -> bool:
-    """Check if the server is in read-only mode."""
-    return _is_true_env("REDMINE_MCP_READ_ONLY", "false")
+    """Check if the server is in read-only mode.
+
+    Default on (fail-closed): set REDMINE_MCP_READ_ONLY=false to allow
+    issue/wiki/time-entry writes.
+    """
+    return _is_true_env("REDMINE_MCP_READ_ONLY", "true")
 
 
 def _is_agile_enabled() -> bool:

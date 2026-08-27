@@ -1,4 +1,4 @@
-Source: redmine-mcp-server
+Source: mcp-server-redmine
 Section: python
 Priority: optional
 Maintainer: Vítězslav Dvořák <info@vitexsoftware.cz>
@@ -12,10 +12,10 @@ Build-Depends:
 Standards-Version: 4.7.0
 Homepage: https://github.com/jztan/redmine-mcp-server
 Rules-Requires-Root: no
-Vcs-Git: https://github.com/Vitexus/redmine-mcp-server.git
-Vcs-Browser: https://github.com/Vitexus/redmine-mcp-server
+Vcs-Git: https://github.com/Vitexus/mcp-server-redmine.git
+Vcs-Browser: https://github.com/Vitexus/mcp-server-redmine
 
-Package: redmine-mcp-server
+Package: mcp-server-redmine
 Architecture: any
 Multi-Arch: foreign
 Depends:
@@ -31,6 +31,9 @@ Depends:
  python3-urllib3,
  python3-importlib-metadata,
  python3-cachetools,
+Provides: redmine-mcp-server
+Replaces: redmine-mcp-server (<< 2.4.1~)
+Breaks: redmine-mcp-server (<< 2.4.1~)
 Description: MCP server for Redmine project management
  Production-ready Model Context Protocol (MCP) server that connects
  AI assistants to Redmine issue tracking and project management.
@@ -41,3 +44,15 @@ Description: MCP server for Redmine project management
  A compatible pydantic-core is bundled privately in
  /usr/lib/redmine-mcp-server/ and activated via the launcher's
  PYTHONPATH so no system packages are modified.
+
+Package: mcprack-mcp-server-redmine
+Architecture: all
+Depends:
+ ${misc:Depends},
+ mcprack (>= 1.5.4),
+ mcp-server-redmine (= ${binary:Version}),
+Description: Registers Redmine MCP server into mcprack catalog
+ Companion package for mcp-server-redmine. Installing it registers
+ the redmine-mcp-server binary (stdio mode, non-OAuth auth only) as
+ an available MCP server in the local mcprack instance; removing it
+ unregisters it again.

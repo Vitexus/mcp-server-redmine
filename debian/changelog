@@ -2,8 +2,12 @@ redmine-mcp-server (2.4.0.2) UNRELEASED; urgency=medium
 
   * Switch dep uvicorn -> python3-uvicorn; drop unused python3-fastapi
     (coinstallable with mcprack)
+  * Add stdio transport (REDMINE_MCP_TRANSPORT=stdio), for local
+    single-user use (e.g. Claude Code) via `mcp.run(transport="stdio")`.
+    Rejects oauth/oauth-proxy auth modes, matching the restriction
+    nextcloud-mcp-server uses for its own stdio mode.
 
- -- vitex <info@vitexsoftware.cz>  Sun, 02 Aug 2026 18:16:07 +0200
+ -- vitex <info@vitexsoftware.cz>  Thu, 27 Aug 2026 13:00:00 +0200
 
 redmine-mcp-server (2.4.0.1) trixie; urgency=medium
 

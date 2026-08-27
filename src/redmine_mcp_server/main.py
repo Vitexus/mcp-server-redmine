@@ -101,6 +101,18 @@ def main():
     # Note: version/auth mode are logged at module level
     # (works for both direct and uvicorn invocation)
 
+    transport = os.getenv("REDMINE_MCP_TRANSPORT", "http").lower()
+
+    if transport == "stdio":
+        if REDMINE_AUTH_MODE in AUTHENTICATED_AUTH_MODES:
+            logger.error(
+                "stdio transport does not support OAuth mode. Use "
+                "REDMINE_AUTH_MODE=legacy (API key or basic auth) for stdio."
+            )
+            raise SystemExit(1)
+        mcp.run(transport="stdio")
+        return
+
     host = os.getenv("SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("SERVER_PORT", "8000"))
 

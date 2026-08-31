@@ -11,7 +11,7 @@ export PYBUILD_NAME=redmine-mcp-server
 # (patch versions match 1:1).  We ship the highest 2.13.x available.
 PYDANTIC_VER        := 2.13.4
 PYDANTIC_CORE_VER   := 2.46.4
-TYPING_EXT_VER      := 4.14.1
+TYPING_EXT_VER      := 4.16.0
 TYPING_INSP_VER     := 0.4.2
 ANNOTATED_TYPES_VER := 0.7.0
 

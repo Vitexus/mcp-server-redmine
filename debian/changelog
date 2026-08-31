@@ -5,6 +5,10 @@ mcp-server-redmine (2.4.1) UNRELEASED; urgency=medium
     a new mcprack-mcp-server-redmine companion package that registers
     it (stdio mode, REDMINE_MCP_TRANSPORT=stdio) into the local mcprack
     catalog. Old package name kept as Provides/Replaces/Breaks.
+  * Bump vendored typing-extensions from 4.14.1 to 4.16.0: the older
+    copy shadowed the system package via PYTHONPATH but lacked the
+    `sentinel` symbol anyio's typed-attribute helpers import, causing
+    the service to crash-loop with ImportError at startup.
 
  -- vitex <info@vitexsoftware.cz>  Thu, 27 Aug 2026 14:15:00 +0200
 

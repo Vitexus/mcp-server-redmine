@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from redminelib.exceptions import ResourceNotFoundError
 
+from .._annotations import CREATE_ANNOTATIONS, LOCAL_MUTATE_ANNOTATIONS, MUTATE_ANNOTATIONS, READ_ONLY_ANNOTATIONS
 from .._cleanup import _ensure_cleanup_started
 from .._client import _get_redmine_client, logger
 from .._env import (
@@ -267,7 +268,10 @@ _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0"}
 _ATTACHMENT_MAX_DOWNLOAD_BYTES_DEFAULT = 200 * 1024 * 1024  # 200 MB
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Redmine Attachment",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def get_redmine_attachment(
     attachment_id: int,
 ) -> Dict[str, Any]:
@@ -490,7 +494,10 @@ def _cleanup_uuid_dir(uuid_dir: Path, *extra_paths: Path) -> None:
         pass
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Files",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_files(
     project_id: Union[str, int],
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
@@ -539,7 +546,10 @@ async def list_files(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Upload File",
+    annotations=CREATE_ANNOTATIONS,
+)
 async def upload_file(
     project_id: Union[str, int],
     filename: Optional[str] = None,
@@ -671,7 +681,10 @@ async def upload_file(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=MUTATE_ANNOTATIONS,
+)
 async def delete_file(
     file_id: int,
     confirm_delete_any_attachment: bool = False,
@@ -781,4 +794,7 @@ async def cleanup_attachment_files() -> Dict[str, Any]:
 # function via its import path regardless -- gating only affects
 # tool discoverability (tools/list) and routing via call_tool.
 if _admin_tools_enabled():
-    cleanup_attachment_files = mcp.tool()(cleanup_attachment_files)
+    cleanup_attachment_files = mcp.tool(
+        title="Cleanup Attachment Files",
+        annotations=LOCAL_MUTATE_ANNOTATIONS,
+    )(cleanup_attachment_files)

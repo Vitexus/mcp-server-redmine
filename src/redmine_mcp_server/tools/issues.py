@@ -9,6 +9,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Set, Union
 from pydantic import Field
 from redminelib.exceptions import ResourceNotFoundError, ValidationError
 
+from .._annotations import CREATE_ANNOTATIONS, MANAGE_ANNOTATIONS, MUTATE_ANNOTATIONS, READ_ONLY_ANNOTATIONS
 from .._cleanup import _ensure_cleanup_started
 from .._client import _get_redmine_client, logger
 from .._custom_fields import (
@@ -691,7 +692,10 @@ def _journal_to_dict(journal: Any, include_private_flag: bool = True) -> Dict[st
     return entry
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Redmine Issue",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def get_redmine_issue(
     issue_id: int,
     include_journals: bool = True,
@@ -834,7 +838,10 @@ async def get_redmine_issue(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Issues",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_issues(
     project_id: Optional[Union[int, str]] = None,
     status_id: Optional[Union[int, Literal["open", "closed", "*"]]] = None,
@@ -1072,7 +1079,10 @@ async def list_redmine_issues(
         return _handle_redmine_error(e, "listing issues")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Redmine Issues",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def search_redmine_issues(
     query: str,
     limit: Annotated[int, Field(ge=1, le=1000)] = 25,
@@ -1271,7 +1281,10 @@ async def search_redmine_issues(
         return _handle_redmine_error(e, f"searching issues with query '{query}'")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Redmine Issue",
+    annotations=CREATE_ANNOTATIONS,
+)
 async def create_redmine_issue(
     project_id: int,
     subject: str,
@@ -1472,7 +1485,10 @@ async def create_redmine_issue(
         return _handle_redmine_error(e, f"creating issue in project {project_id}")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Redmine Issue",
+    annotations=MUTATE_ANNOTATIONS,
+)
 async def update_redmine_issue(
     issue_id: int,
     fields: Dict[str, Any],
@@ -1741,7 +1757,10 @@ async def update_redmine_issue(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Copy Issue",
+    annotations=CREATE_ANNOTATIONS,
+)
 async def copy_issue(
     issue_id: int,
     project_id: Optional[Union[str, int]] = None,
@@ -1902,7 +1921,10 @@ async def _delete_issue_relation_action(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Issue Relation",
+    annotations=MANAGE_ANNOTATIONS,
+)
 @action_dispatch(
     {
         "list": ActionMode.READ,
@@ -1944,7 +1966,10 @@ async def manage_issue_relation(
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Subtasks",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_subtasks(
     issue_id: int,
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
@@ -1977,7 +2002,10 @@ async def list_subtasks(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Redmine Issue",
+    annotations=MUTATE_ANNOTATIONS,
+)
 async def delete_redmine_issue(
     issue_id: Optional[int] = None,
     confirm_delete: bool = False,
@@ -2179,7 +2207,10 @@ async def _remove_issue_watcher_action(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Issue Watcher",
+    annotations=MANAGE_ANNOTATIONS,
+)
 @action_dispatch(
     {
         "add": ActionMode.WRITE,
@@ -2261,7 +2292,10 @@ async def _set_private_issue_note_action(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Issue Note",
+    annotations=MANAGE_ANNOTATIONS,
+)
 @action_dispatch(
     {
         "edit": ActionMode.WRITE,
@@ -2301,7 +2335,10 @@ async def manage_issue_note(
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Private Notes",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def get_private_notes(issue_id: int) -> List[Dict[str, Any]]:
     """Retrieve only the private notes/journals of a Redmine issue.
 
@@ -2450,7 +2487,10 @@ async def _delete_issue_category_action(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Issue Category",
+    annotations=MANAGE_ANNOTATIONS,
+)
 @action_dispatch(
     {
         "list": ActionMode.READ,

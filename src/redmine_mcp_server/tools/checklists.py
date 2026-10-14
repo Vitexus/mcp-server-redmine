@@ -3,6 +3,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
+from .._annotations import CREATE_ANNOTATIONS, MUTATE_ANNOTATIONS, READ_ONLY_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._env import _is_checklists_enabled, _is_read_only_mode
 from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
@@ -78,7 +79,10 @@ def _create_checklist_item_api(issue_id: int, payload: Dict[str, Any]) -> Any:
     )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Checklist",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def get_checklist(issue_id: int) -> Dict[str, Any]:
     """Retrieve all checklist items for a Redmine issue.
 
@@ -120,7 +124,10 @@ async def get_checklist(issue_id: int) -> Dict[str, Any]:
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Checklist Item",
+    annotations=MUTATE_ANNOTATIONS,
+)
 async def update_checklist_item(
     checklist_item_id: int,
     subject: Optional[str] = None,
@@ -191,7 +198,10 @@ async def update_checklist_item(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Checklist Item",
+    annotations=CREATE_ANNOTATIONS,
+)
 async def create_checklist_item(
     issue_id: int,
     subject: str,

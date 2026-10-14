@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from redminelib.exceptions import ResourceNotFoundError
 
+from .._annotations import MANAGE_ANNOTATIONS, READ_ONLY_ANNOTATIONS
 from .._cleanup import _ensure_cleanup_started
 from .._client import _get_redmine_client
 from .._custom_fields import _extract_possible_values
@@ -202,7 +203,10 @@ def _membership_to_dict(membership: Any) -> Dict[str, Any]:
     return result
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Projects",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_projects() -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Lists all accessible projects in Redmine.
@@ -225,7 +229,10 @@ async def list_redmine_projects() -> Union[List[Dict[str, Any]], Dict[str, Any]]
         return _handle_redmine_error(e, "listing projects")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Project Issue Custom Fields",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_project_issue_custom_fields(
     project_id: Union[str, int], tracker_id: Optional[Union[str, int]] = None
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
@@ -311,7 +318,10 @@ async def list_project_issue_custom_fields(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Versions",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_versions(
     project_id: Union[str, int],
     status_filter: Optional[str] = None,
@@ -469,7 +479,10 @@ async def _delete_redmine_version_action(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Redmine Version",
+    annotations=MANAGE_ANNOTATIONS,
+)
 @action_dispatch(
     {
         "create": ActionMode.WRITE,
@@ -521,7 +534,10 @@ async def manage_redmine_version(
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Summarize Project Status",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def summarize_project_status(project_id: int, days: int = 30) -> Dict[str, Any]:
     """Provide a summary of project status based on issue activity over the
     specified time period.
@@ -614,7 +630,10 @@ async def summarize_project_status(project_id: int, days: int = 30) -> Dict[str,
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Project Members",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_project_members(
     project_id: Union[str, int],
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
@@ -658,7 +677,10 @@ async def list_project_members(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Roles",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_roles() -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """List all roles defined in the Redmine instance.
 
@@ -693,7 +715,10 @@ async def list_redmine_roles() -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         return _handle_redmine_error(e, "listing roles")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Modules",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def get_project_modules(
     project_id: Union[str, int],
 ) -> Dict[str, Any]:
@@ -860,7 +885,10 @@ async def _remove_project_member_action(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Project Member",
+    annotations=MANAGE_ANNOTATIONS,
+)
 @action_dispatch(
     {
         "add": ActionMode.WRITE,
@@ -903,7 +931,10 @@ async def manage_project_member(
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Project Trackers",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_project_trackers(
     project_id: Union[str, int],
 ) -> List[Dict[str, Any]]:

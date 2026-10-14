@@ -5,6 +5,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import Field
 
+from .._annotations import MANAGE_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._decorators import ActionMode, action_dispatch
 from .._env import _is_products_enabled
@@ -256,7 +257,10 @@ async def _manage_product_dispatch(action: str, **kwargs: Any) -> Any:
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Product",
+    annotations=MANAGE_ANNOTATIONS,
+)
 async def manage_product(
     action: Literal["list", "get", "create", "update"],
     project_id: Optional[Union[str, int]] = None,

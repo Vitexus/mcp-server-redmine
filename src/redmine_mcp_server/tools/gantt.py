@@ -4,6 +4,7 @@ from typing import Annotated, Any, Dict, List, Optional, Union
 
 from pydantic import Field
 
+from .._annotations import READ_ONLY_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._errors import _handle_redmine_error
 from .._serialization import (
@@ -70,7 +71,10 @@ def _gantt_version_to_dict(version: Any) -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Gantt Chart",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def get_gantt_chart(
     project_id: Union[str, int],
     start_date_after: Optional[str] = None,

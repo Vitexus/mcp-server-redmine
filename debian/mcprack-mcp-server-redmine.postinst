@@ -8,7 +8,7 @@ case "$1" in
         mcprack server create mcp-server-redmine \
           --label 'Redmine MCP Server' \
           --transport stdio \
-          --command /usr/bin/redmine-mcp-server \
+          --command /usr/bin/mcp-server-redmine \
           --set-env REDMINE_MCP_TRANSPORT=stdio \
           --category debian \
           --enabled" || true

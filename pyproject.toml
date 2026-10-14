@@ -51,6 +51,7 @@ Issues = "https://github.com/jztan/redmine-mcp-server/issues"
 Changelog = "https://github.com/jztan/redmine-mcp-server/blob/develop/CHANGELOG.md"
 
 [project.scripts]
+mcp-server-redmine = "redmine_mcp_server.main:main"
 redmine-mcp-server = "redmine_mcp_server.main:main"
 
 [project.optional-dependencies]

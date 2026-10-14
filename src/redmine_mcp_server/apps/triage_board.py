@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from fastmcp.apps.config import AppConfig, ResourceCSP
 
+from .._annotations import READ_ONLY_ANNOTATIONS
 from .._env import _is_read_only_mode
 from ..server import mcp
 from ..tools.enumeration import list_redmine_issue_statuses
@@ -105,6 +106,8 @@ def triage_board_ui() -> str:
 
 
 @mcp.tool(
+    title="Show Triage Board",
+    annotations=READ_ONLY_ANNOTATIONS,
     app=AppConfig(
         resource_uri=_UI_RESOURCE_URI,
         visibility=["model"],
@@ -142,7 +145,11 @@ async def show_triage_board(
     return await _build_board_payload(project_id, filters)
 
 
-@mcp.tool(app=AppConfig(visibility=["app"]))
+@mcp.tool(
+    title="Get Triage Board Data",
+    annotations=READ_ONLY_ANNOTATIONS,
+    app=AppConfig(visibility=["app"]),
+)
 async def get_triage_board_data(
     project_id: Union[int, str],
     filters: Optional[Dict[str, Any]] = None,

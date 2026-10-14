@@ -2,6 +2,7 @@
 
 from typing import Any, Dict, List, Literal, Optional, Union
 
+from .._annotations import MANAGE_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._decorators import ActionMode, action_dispatch
 from .._errors import _handle_redmine_error
@@ -284,7 +285,10 @@ async def _rename_wiki_page_action(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Redmine Wiki Page",
+    annotations=MANAGE_ANNOTATIONS,
+)
 @action_dispatch(
     {
         "list": ActionMode.READ,

@@ -5,6 +5,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import Field
 
+from .._annotations import CREATE_ANNOTATIONS, MANAGE_ANNOTATIONS, READ_ONLY_ANNOTATIONS
 from .._client import _get_redmine_client, logger
 from .._decorators import ActionMode, action_dispatch
 from .._env import _is_read_only_mode
@@ -52,7 +53,10 @@ def _time_entry_to_dict(time_entry: Any) -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Time Entries",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_time_entries(
     project_id: Optional[Union[str, int]] = None,
     issue_id: Optional[int] = None,
@@ -203,7 +207,10 @@ async def _update_time_entry_action(
         )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Time Entry",
+    annotations=MANAGE_ANNOTATIONS,
+)
 @action_dispatch(
     {
         "create": ActionMode.WRITE,
@@ -248,7 +255,10 @@ async def manage_time_entry(
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Time Entry Activities",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_time_entry_activities(
     project_id: Optional[Union[str, int]] = None,
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
@@ -339,7 +349,10 @@ async def list_time_entry_activities(
         return _handle_redmine_error(e, "listing time entry activities")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Import Time Entries",
+    annotations=CREATE_ANNOTATIONS,
+)
 async def import_time_entries(
     entries: List[Dict[str, Any]],
     stop_on_error: bool = False,

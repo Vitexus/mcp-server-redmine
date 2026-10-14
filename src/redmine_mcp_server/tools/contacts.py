@@ -5,6 +5,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import Field
 
+from .._annotations import MANAGE_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._decorators import ActionMode, action_dispatch
 from .._env import _is_crm_enabled
@@ -394,7 +395,10 @@ async def _manage_contact_dispatch(action: str, **kwargs: Any) -> Any:
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Contact",
+    annotations=MANAGE_ANNOTATIONS,
+)
 async def manage_contact(
     action: Literal[
         "list",

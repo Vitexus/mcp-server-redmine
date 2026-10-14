@@ -9,13 +9,17 @@ from typing import Annotated, Any, Dict, List, Optional, Union
 
 from pydantic import Field
 
+from .._annotations import READ_ONLY_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._errors import _handle_redmine_error
 from .._serialization import _iter_capped, _safe_isoformat
 from ..server import mcp
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Trackers",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_trackers() -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """List all trackers (issue types) defined in the Redmine instance.
 
@@ -49,7 +53,10 @@ async def list_redmine_trackers() -> Union[List[Dict[str, Any]], Dict[str, Any]]
         return _handle_redmine_error(e, "listing trackers")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Issue Statuses",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_issue_statuses() -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """List all issue statuses defined in the Redmine instance.
 
@@ -85,7 +92,10 @@ async def list_redmine_issue_statuses() -> Union[List[Dict[str, Any]], Dict[str,
         return _handle_redmine_error(e, "listing issue statuses")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Issue Priorities",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_issue_priorities() -> (
     Union[List[Dict[str, Any]], Dict[str, Any]]
 ):
@@ -124,7 +134,10 @@ async def list_redmine_issue_priorities() -> (
         return _handle_redmine_error(e, "listing issue priorities")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Users",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_users(
     name: Optional[str] = None,
     group_id: Optional[int] = None,
@@ -177,7 +190,10 @@ async def list_redmine_users(
         return _handle_redmine_error(e, "listing users")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def get_current_user() -> Dict[str, Any]:
     """Retrieve the currently authenticated user's profile.
 
@@ -211,7 +227,10 @@ async def get_current_user() -> Dict[str, Any]:
         return _handle_redmine_error(e, "fetching current user")
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Redmine Queries",
+    annotations=READ_ONLY_ANNOTATIONS,
+)
 async def list_redmine_queries() -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """List all saved custom queries visible to the current user.
 

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from fastmcp.apps.config import AppConfig, ResourceCSP
 
+from .._annotations import READ_ONLY_ANNOTATIONS
 from .._env import _is_read_only_mode
 from ..server import mcp
 from ..tools.enumeration import (
@@ -244,6 +245,8 @@ def project_dashboard_ui() -> str:
 
 
 @mcp.tool(
+    title="Show Project Dashboard",
+    annotations=READ_ONLY_ANNOTATIONS,
     app=AppConfig(
         resource_uri=_UI_RESOURCE_URI,
         visibility=["model"],
@@ -278,7 +281,11 @@ async def show_project_dashboard(
     return await _build_dashboard_payload(project_id, filters)
 
 
-@mcp.tool(app=AppConfig(visibility=["app"]))
+@mcp.tool(
+    title="Get Project Dashboard Data",
+    annotations=READ_ONLY_ANNOTATIONS,
+    app=AppConfig(visibility=["app"]),
+)
 async def get_project_dashboard_data(
     project_id: Union[int, str],
     filters: Optional[Dict[str, Any]] = None,

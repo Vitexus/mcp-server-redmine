@@ -107,3 +107,54 @@ def mock_api_key_env(monkeypatch):
     # Remove username/password if they exist
     monkeypatch.delenv("REDMINE_USERNAME", raising=False)
     monkeypatch.delenv("REDMINE_PASSWORD", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_legacy_client_cache_between_tests():
+    """Keep the per-thread legacy client cache from leaking across tests.
+
+    Tests patch ``_client._legacy_client`` to None to force a rebuild. Without
+    this, a client cached in a worker thread by an earlier test would be
+    returned instead (issue #216).
+    """
+    from redmine_mcp_server import _client
+
+    _client._reset_legacy_client_cache()
+    yield
+    _client._reset_legacy_client_cache()
+
+
+@pytest.fixture(autouse=True)
+def _restore_mcp_transforms():
+    """Undo the visibility transforms a test adds to the shared FastMCP server.
+
+    ``mcp.enable``/``mcp.disable`` append a transform on every call and never
+    drop one, and each lookup walks the whole chain recursively. Production
+    applies plugin visibility once at startup, but the suite applies it (and
+    reloads ``main``, which applies it again) hundreds of times, so without
+    this the chain outgrows Python's recursion limit once enough plugin
+    families exist. Skipped until ``server`` is imported so cold-start import
+    tests still see a fresh interpreter state.
+    """
+    server = sys.modules.get("redmine_mcp_server.server")
+    mcp = getattr(server, "mcp", None)
+    saved = list(mcp._transforms) if mcp is not None else None
+    yield
+    if mcp is not None:
+        mcp._transforms[:] = saved
+
+
+@pytest.fixture
+def all_plugin_tools_visible():
+    """Re-enable every plugin family on the shared FastMCP instance.
+
+    Importing ``redmine_mcp_server.main`` applies plugin visibility with the
+    unit-suite environment (all flags off), which hides plugin tools from
+    ``list_tools()``. Tests that enumerate the full surface use this fixture
+    so their result does not depend on which test imported main first.
+    """
+    from redmine_mcp_server import server as _server
+    from redmine_mcp_server._plugin_visibility import enable_all_plugin_tools
+
+    enable_all_plugin_tools(_server.mcp)
+    yield

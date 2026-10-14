@@ -5,17 +5,30 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import Field
 
-from .._annotations import MANAGE_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._decorators import ActionMode, action_dispatch
-from .._env import _is_crm_enabled
+from .._env import _crm_edition, _is_crm_enabled
 from .._errors import _handle_redmine_error
+from .._offload import offloaded
 from .._serialization import (
     _REDMINE_API_PAGE_CAP,
+    _custom_fields_to_list,
+    _deal_note_to_dict,
+    _named_ref,
+    _normalize_tag_list,
+    _pagination_info,
+    _payload_int,
     _safe_isoformat,
     wrap_insecure_content,
 )
-from .._validation import _is_positive_int, _is_valid_project_id
+from .._validation import (
+    _is_positive_int,
+    _is_valid_project_id,
+    _reject_non_scalar_filter_values,
+    _reject_reserved_query_keys,
+    _reject_unregistered_filter_keys,
+)
+from .._plugin_visibility import plugin_tag
 from ..server import mcp
 
 _CRM_DISABLED_ERROR = {
@@ -25,6 +38,96 @@ _CRM_DISABLED_ERROR = {
         "Requires the RedmineUP CRM plugin."
     )
 }
+
+# Query parameters this signature owns. Each is validated above, so accepting
+# it through `filters` too would give a caller a second, unchecked route to the
+# same key -- and a `limit` raised that way is only bytes Redmine renders and
+# the local slice discards. `filters` exists for the keys this signature does
+# not name, `cf_<id>` above all.
+# Only what `_list_contacts_action` validates itself. Everything else a given
+# CRM build registers as a filter is reachable through `filters`, which cannot
+# promise the build registers it -- see the `filters` note in `manage_contact`.
+_CONTACT_OWNED_QUERY_KEYS = frozenset(
+    {
+        "limit",
+        "offset",
+        "project_id",
+        "search",
+        "tags",
+        "assigned_to_id",
+        "author_id",
+        "first_name",
+        "last_name",
+        "middle_name",
+        "company",
+        "job_title",
+        "email",
+        "phone",
+        # Not a query parameter at all: it selects the response shape. Named
+        # here so `filters` cannot swallow it, which would send Redmine a key
+        # it ignores and hand the caller a bare list they asked to be an
+        # envelope -- back to paging blind, with nothing saying so.
+        "include_pagination_info",
+        # The same, and the same reason: through `filters` it would reach
+        # Redmine as an unregistered key, be ignored there, and leave the
+        # caller with the full rows they asked to do without.
+        "include_custom_fields",
+        # The same again: it selects which custom field values come back.
+        "custom_field_ids",
+        # Sent in the one spelling every database adapter reads (see
+        # `_list_contacts_action`); through `filters` a caller would have to
+        # know the database's own literal for true.
+        "is_company",
+    }
+)
+
+# Every filter the CRM plugin's `ContactQuery#initialize_available_filters`
+# registers, read from the installed `redmine_contacts` 4.4.5 PRO source (the
+# set is unchanged on 4.4.7) rather
+# than guessed: 22 `add_available_filter` calls, plus `author_id` and
+# `assigned_to_id` from `initialize_author_filter` and
+# `initialize_assignee_filter` (`app/models/crm_query.rb`), plus `cf_<id>` from
+# `add_custom_fields_filters`.
+#
+# The Light build registers only `tags`, and this set is deliberately the Pro
+# one: a name Light does not register is dropped by Redmine exactly as it is
+# today, so a superset refuses nothing a caller could have used, while the
+# attributes worth an explicit error already get one from the edition gate
+# above. Three of these are registered only `unless users_values.empty?`, which
+# is the same one-directional safety.
+_CONTACT_QUERY_FILTER_NAMES = frozenset(
+    {
+        "assigned_to_id",
+        "author_id",
+        "city",
+        "company",
+        "country",
+        "created_on",
+        "email",
+        "first_name",
+        "full_address",
+        "has_deals",
+        "has_open_issues",
+        "ids",
+        "is_company",
+        "job_title",
+        "last_name",
+        "last_note",
+        "middle_name",
+        "phone",
+        "postcode",
+        "region",
+        "street1",
+        "street2",
+        "tags",
+        "updated_on",
+    }
+)
+
+# `ContactQuery` ends with `add_associations_custom_fields_filters :author,
+# :assigned_to`, so `author.cf_<id>` and `assigned_to.cf_<id>` are registered
+# filters and must not be refused.
+_CONTACT_QUERY_ASSOCIATIONS = frozenset({"author", "assigned_to"})
 
 _CONTACT_WRITABLE_FIELDS = {
     "first_name",
@@ -48,12 +151,143 @@ _CONTACT_WRITABLE_FIELDS = {
 }
 
 
-def _contact_to_dict(contact: Dict[str, Any]) -> Dict[str, Any]:
+def _contact_channel_to_list(raw: Any, inner_key: str) -> List[str]:
+    """Flatten a CRM contact channel to a list of strings.
+
+    The CRM API renders a contact's email and phone entries as arrays of
+    objects -- ``emails`` as ``[{"address": ...}]`` and ``phones`` as
+    ``[{"number": ...}]`` -- so reading the scalar ``email`` and ``phone`` keys
+    returned ``None`` for every contact however many addresses it had. A bare
+    string is accepted so a payload using the scalar spelling still reads.
+
+    Only the channel's own key is read. Falling back to the other channel's key
+    would report a street address as a phone number, and returning nothing is
+    the better failure: a caller can see an empty list, but cannot see that a
+    populated one holds the wrong kind of value.
+    """
+    values: List[str] = []
+    for entry in raw if isinstance(raw, (list, tuple)) else [raw]:
+        if isinstance(entry, str):
+            value: Any = entry
+        elif isinstance(entry, dict):
+            value = entry.get(inner_key)
+        else:
+            value = None
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    return values
+
+
+def _contact_tag_names(raw: Any) -> List[str]:
+    """Tag names from either spelling the payload might use.
+
+    ``tag_list`` holds names, as a list or a comma-separated string. The
+    ``tags`` fallback can hold ``[{"id", "name"}]``, the shape the tags plugin
+    renders elsewhere in this server, so dict entries are reduced to their name
+    before the shared coercion runs -- otherwise ``str()`` would stringify the
+    whole dict into a tag name.
+    """
+    if isinstance(raw, (list, tuple)):
+        raw = [entry.get("name") if isinstance(entry, dict) else entry for entry in raw]
+    return _normalize_tag_list(raw)
+
+
+def _contact_deal_to_dict(deal: Any) -> Dict[str, Any]:
+    """Serialize one entry of a contact's ``include=deals`` array.
+
+    Only the keys ``contacts/show.api.rsb`` renders for an embedded deal --
+    a subset of what ``manage_deal`` returns, so ``_deal_to_dict`` would
+    report ``None`` for keys the plugin never sent. ``background`` is free
+    text and is wrapped in boundary tags, as it is on a deal.
+    """
+    if not isinstance(deal, dict):
+        return {}
+    return {
+        "id": deal.get("id"),
+        "name": deal.get("name", ""),
+        "price": deal.get("price"),
+        "currency": deal.get("currency"),
+        "price_type": deal.get("price_type"),
+        "project": _named_ref(deal.get("project")),
+        "status": _named_ref(deal.get("status")),
+        "background": wrap_insecure_content(deal.get("background", "")),
+        "created_on": _safe_isoformat(deal.get("created_on")),
+        "updated_on": _safe_isoformat(deal.get("updated_on")),
+    }
+
+
+def _contact_issue_to_dict(issue: Any) -> Dict[str, Any]:
+    """Serialize one entry of a contact's ``include=issues`` array.
+
+    The keys ``contacts/show.api.rsb`` renders for a linked issue, and no
+    others.
+    """
+    if not isinstance(issue, dict):
+        return {}
+    return {
+        "id": issue.get("id"),
+        "subject": issue.get("subject"),
+        "status": _named_ref(issue.get("status")),
+        "due_date": _safe_isoformat(issue.get("due_date")),
+        "created_on": _safe_isoformat(issue.get("created_on")),
+        "updated_on": _safe_isoformat(issue.get("updated_on")),
+    }
+
+
+def _contact_includes_to_dict(contact: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``include=`` arrays a single contact's payload carries.
+
+    Each key is emitted only when the payload carries it, the way
+    ``_deal_to_dict`` treats ``notes``. The plugin renders an array only when
+    it was asked for *and* is non-empty *and* the caller may see it --
+    ``notes`` needs ``authorize_for(:notes, :show)``, ``deals``
+    ``view_deals``, ``issues`` ``view_issues`` -- so an absent key cannot say
+    which of those it was, and ``[]`` would claim a distinction the API does
+    not make.
+
+    ``notes`` share the deal template's keys exactly, so the deal note
+    serializer is reused. ``contacts`` is a company's people, rendered as
+    ``{id, name}`` refs.
+    """
+    serializers = {
+        "notes": _deal_note_to_dict,
+        "contacts": _named_ref,
+        "deals": _contact_deal_to_dict,
+        "issues": _contact_issue_to_dict,
+    }
+    result: Dict[str, Any] = {}
+    for key, serialize in serializers.items():
+        raw = contact.get(key)
+        if isinstance(raw, list):
+            result[key] = [serialize(entry) for entry in raw if isinstance(entry, dict)]
+    return result
+
+
+def _contact_to_dict(
+    contact: Dict[str, Any],
+    include_custom_fields: bool = False,
+    custom_field_ids: Optional[List[int]] = None,
+) -> Dict[str, Any]:
     """Serialize a RedmineUP CRM API response into a stable dict.
 
     User-controlled fields are wrapped in ``<insecure-content>`` boundary
-    tags. Contact PII (email, phone, address) is returned as-is to the
-    caller but never logged via logger.* calls in this module.
+    tags. Contact PII (email, phone, address) is returned as-is to the caller.
+    This module makes no logger.* calls, but note that a ``list`` filtered on
+    an email, phone or name puts that value in the request query string, which
+    a transport-level exception can carry into ``_handle_redmine_error``;
+    ``_scrub_error_message`` redacts credentials, not filter values.
+
+    Where the CRM API's own key differs from the one this serializer first
+    assumed, both are read: emails and phones arrive as the ``emails`` and
+    ``phones`` arrays, tags as ``tag_list``, and the address sub-document uses
+    the plugin's own field names rather than a fixed set. Reading only the
+    original spelling meant those fields came back empty no matter what the
+    contact held. ``author``, ``projects`` and ``custom_fields`` are rendered by
+    the API and were dropped entirely.
+
+    ``projects`` is emitted only when the payload carries it -- the CRM API
+    renders it on a single contact but not on a collection -- so an absent key
+    is not reported as an empty list.
     """
     if not isinstance(contact, dict):
         return {}
@@ -61,58 +295,160 @@ def _contact_to_dict(contact: Dict[str, Any]) -> Dict[str, Any]:
     assigned = raw_assigned if isinstance(raw_assigned, dict) else {}
     raw_address = contact.get("address")
     address = raw_address if isinstance(raw_address, dict) else {}
-    return {
+    raw_author = contact.get("author")
+    author = raw_author if isinstance(raw_author, dict) else {}
+    # ``or`` rather than ``get(key, default)``: the default applies only when
+    # the key is absent, so a payload sending the array key explicitly null --
+    # or empty, as a create echo may -- would never reach the scalar spelling.
+    emails = _contact_channel_to_list(
+        contact.get("emails") or contact.get("email"), "address"
+    )
+    phones = _contact_channel_to_list(
+        contact.get("phones") or contact.get("phone"), "number"
+    )
+    raw_tags = contact.get("tag_list") or contact.get("tags")
+
+    result: Dict[str, Any] = {
         "id": contact.get("id"),
         "first_name": contact.get("first_name", ""),
         "last_name": contact.get("last_name", ""),
         "middle_name": contact.get("middle_name", ""),
         "company": contact.get("company", ""),
         "job_title": contact.get("job_title", ""),
-        "phone": contact.get("phone"),
-        "email": contact.get("email"),
+        "phone": phones[0] if phones else None,
+        "phones": phones,
+        "email": emails[0] if emails else None,
+        "emails": emails,
         "website": contact.get("website"),
         "skype_name": contact.get("skype_name"),
         "birthday": contact.get("birthday"),
         "background": wrap_insecure_content(contact.get("background", "")),
-        "address": (
-            {
-                "street1": address.get("street1"),
-                "street2": address.get("street2"),
-                "city": address.get("city"),
-                "region": address.get("region"),
-                "country": address.get("country"),
-                "postcode": address.get("postcode"),
-            }
-            if address
-            else None
-        ),
+        # Passed through rather than rebuilt from a fixed key set: the plugin
+        # names these itself, and a hardcoded list both dropped what it did not
+        # know (`full_address`) and reported nulls for keys it never sends.
+        "address": dict(address) if address else None,
         "is_company": contact.get("is_company", False),
-        "tags": contact.get("tags") or [],
+        "tags": _contact_tag_names(raw_tags),
         "visibility": contact.get("visibility"),
-        "assigned_to": (
-            {
-                "id": assigned.get("id"),
-                "name": assigned.get("name", ""),
-            }
-            if assigned
-            else None
-        ),
+        "assigned_to": _named_ref(assigned) if assigned else None,
+        "author": _named_ref(author) if author else None,
         "created_on": _safe_isoformat(contact.get("created_on")),
         "updated_on": _safe_isoformat(contact.get("updated_on")),
     }
+    # The CRM API renders every custom field on every contact whether or not
+    # it carries a value (``render_api_custom_values`` is unconditional in the
+    # plugin's ``contacts/index.api.rsb``), so a list read that wants one
+    # attribute pays for the whole set on every row. Reading them costs no
+    # request -- the payload already carries them -- but returning them is the
+    # larger half of a contact row, so the collection does not return them
+    # unasked.
+    #
+    # Elided the way #315 elides a long journal value, rather than by dropping
+    # the key: ``custom_fields`` stays present holding ``None``, so a caller
+    # reading it gets no ``KeyError`` and can tell "not requested" from "this
+    # contact has none" (``[]``). ``custom_fields_count`` is the ``_length``
+    # of that idiom -- what was withheld, so a caller can decide whether to
+    # ask again. The ``elided: True`` flag that goes with it there is NOT
+    # copied, and deliberately: a journal detail needs it because ``None`` is
+    # a real ``old_value``, so the flag is the only thing separating elided
+    # from genuinely empty. Here ``None`` is never a real value for a
+    # list-valued key, so it carries that meaning by itself and a flag would
+    # only restate it.
+    #
+    # ``custom_field_ids`` narrows the values to the fields named, in the
+    # order the payload carries them, and implies ``include_custom_fields``:
+    # the fields were requested, so there is no count, and ``[]`` still means
+    # this contact carries none of them.
+    custom_fields = _custom_fields_to_list(contact)
+    if custom_field_ids is not None:
+        wanted = set(custom_field_ids)
+        custom_fields = [cf for cf in custom_fields if cf["id"] in wanted]
+        include_custom_fields = True
+    if include_custom_fields:
+        result["custom_fields"] = custom_fields
+    else:
+        result["custom_fields"] = None
+        result["custom_fields_count"] = len(custom_fields)
+    if "projects" in contact:
+        raw_projects = contact["projects"]
+        result["projects"] = (
+            [_named_ref(p) for p in raw_projects if isinstance(p, dict)]
+            if isinstance(raw_projects, (list, tuple))
+            else []
+        )
+    return result
 
 
-async def _list_contacts_action(
+def _contact_pagination_info(
+    payload: Dict[str, Any], limit: int, offset: int, count: int, *, searched: bool
+) -> Dict[str, Any]:
+    """Pagination metadata for a contact list, in the issue tools' shape.
+
+    ``limit`` and ``offset`` are the window Redmine reports having applied,
+    falling back to the requested values when it reports none. Redmine echoes
+    both alongside ``total_count``, and a build that served a smaller page than
+    was asked for would otherwise get a ``next_offset`` that steps over the
+    rows it withheld.
+
+    ``total`` is Redmine's own ``total_count``, which arrives beside the
+    collection and so costs no second request -- except under ``search``,
+    where it does not measure the collection being paged.
+    ``ContactsController#index`` counts with ``@query.object_count``, which is
+    ``objects_scope`` with no options, while the rows come from
+    ``results_scope(:search => params[:search])``, and ``ContactQuery``
+    registers no ``search`` filter (confirmed on 4.4.5 Pro). So the reported
+    total is the collection *before* the search. Believing it walks the caller
+    through empty pages: a search matching 3 of 250 contacts answers
+    ``has_next`` true at offset 0 and again at offset 100, three requests to
+    read three rows, where the full-page inference would have said "done"
+    correctly. A searched page therefore reports no total, exactly as a build
+    that renders none does. Every other narrowing parameter this tool sends is
+    a registered ``ContactQuery`` filter, so those narrow the count too and
+    the total stays honest.
+    """
+    applied_limit = _payload_int(payload.get("limit"), minimum=1)
+    applied_offset = _payload_int(payload.get("offset"), minimum=0)
+    return _pagination_info(
+        limit=limit if applied_limit is None else applied_limit,
+        offset=offset if applied_offset is None else applied_offset,
+        count=count,
+        total=None if searched else _payload_int(payload.get("total_count"), minimum=0),
+    )
+
+
+@offloaded
+def _list_contacts_action(
     project_id: Optional[Union[str, int]] = None,
     search: Optional[str] = None,
     tags: Optional[str] = None,
     assigned_to_id: Optional[int] = None,
+    author_id: Optional[int] = None,
     limit: int = 100,
+    offset: int = 0,
+    include_pagination_info: bool = False,
+    include_custom_fields: bool = False,
+    custom_field_ids: Optional[List[int]] = None,
+    is_company: Optional[bool] = None,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    middle_name: Optional[str] = None,
+    company: Optional[str] = None,
+    job_title: Optional[str] = None,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    filters: Optional[Dict[str, Any]] = None,
     **_: Any,
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    # The dispatcher hands every `manage_contact` parameter to every action, so
+    # `**_` collects the ones that belong to another action. Filters are built
+    # from the named parameters below rather than from the collected keyword
+    # arguments: `fields` arrives here on every call and Redmine would read it
+    # as a filter-field list, wiping the query (_reject_reserved_query_keys).
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         return {"error": "limit must be a positive integer."}
     limit = min(limit, _REDMINE_API_PAGE_CAP)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        return {"error": "offset must be a non-negative integer."}
     if project_id is not None and not _is_valid_project_id(project_id):
         return {
             "error": (
@@ -120,32 +456,162 @@ async def _list_contacts_action(
                 "positive integer."
             )
         }
+    # An empty list is refused rather than read as "no fields": that is what
+    # leaving the parameter out already means, and a caller building the list
+    # from a lookup that found nothing is better told than handed the elided
+    # shape as if it had asked for it.
+    if custom_field_ids is not None and (
+        not isinstance(custom_field_ids, list)
+        or not custom_field_ids
+        or not all(_is_positive_int(cf_id) for cf_id in custom_field_ids)
+    ):
+        return {
+            "error": (
+                "custom_field_ids must be a non-empty list of positive integer "
+                "custom field IDs."
+            )
+        }
+    if is_company is not None and not isinstance(is_company, bool):
+        return {"error": "is_company must be a boolean."}
     params: Dict[str, Any] = {"limit": limit}
+    if offset:
+        params["offset"] = offset
     if project_id is not None:
         params["project_id"] = project_id
     if search is not None:
         params["search"] = search
     if tags is not None:
         params["tags"] = tags
-    if assigned_to_id is not None:
-        if not _is_positive_int(assigned_to_id):
-            return {"error": "assigned_to_id must be a positive integer."}
-        params["assigned_to_id"] = assigned_to_id
+    # Filters only the CRM plugin's Pro build registers. `assigned_to_id` is
+    # absent from Light's `ContactQuery` too, but it is already on the tool and
+    # predates this gate, so it is left alone rather than newly refused.
+    pro_only = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "middle_name": middle_name,
+        "company": company,
+        "job_title": job_title,
+        "email": email,
+        "phone": phone,
+        "author_id": author_id,
+        "is_company": is_company,
+    }
+    requested = sorted(name for name, value in pro_only.items() if value is not None)
+    if requested:
+        try:
+            edition = _crm_edition()
+        except RuntimeError as exc:
+            return {"error": str(exc)}
+        if edition != "pro":
+            return {
+                "error": (
+                    f"{', '.join(requested)}: the CRM plugin's Light build does "
+                    "not register these as query filters, and Redmine ignores "
+                    "an unregistered filter without erroring -- the list would "
+                    "come back unfiltered rather than empty, which is why this "
+                    "is refused instead of sent. Set REDMINE_CRM_EDITION=pro if "
+                    "this Redmine runs the Pro build, or filter the returned "
+                    "contacts locally."
+                )
+            }
+
+    for name, user_id in (
+        ("assigned_to_id", assigned_to_id),
+        ("author_id", author_id),
+    ):
+        if user_id is None:
+            continue
+        if not _is_positive_int(user_id):
+            return {"error": f"{name} must be a positive integer."}
+        params[name] = user_id
+
+    # Reaching here means the deployment declared the Pro build. Verified
+    # against 4.4.5 PRO by comparing the returned id set with ground truth
+    # computed from the payload, rather than only checking that a non-matching
+    # value came back empty.
+    for name, value in pro_only.items():
+        if value is not None and name not in ("author_id", "is_company"):
+            params[name] = value
+    # ``ContactQuery#sql_for_is_company_field`` (redmine_contacts 4.4.5) reads
+    # a value as true only when it equals the adapter's ``quoted_true``, whose
+    # spelling varies by adapter and Rails version, and anything else as
+    # false, so no fixed literal means true everywhere. ``"0"`` is nobody's
+    # true, so it means false everywhere, and ``"!0"`` is its negation: ``!``
+    # is the ``:list`` filter's other operator, which Redmine's short-filter
+    # parser strips before the plugin maps the value.
+    if is_company is not None:
+        params["is_company"] = "!0" if is_company else "0"
+
+    if filters is not None:
+        if not isinstance(filters, dict):
+            return {"error": "filters must be a dict of Redmine query parameters."}
+        # `manage_contact` carries create and update attributes in its own
+        # `fields` parameter, so a caller reaching for `filters` can hit this
+        # by accident.
+        reserved_error = _reject_reserved_query_keys(filters)
+        if reserved_error:
+            return {
+                "error": (
+                    f"{reserved_error} Pass contact attributes through "
+                    "`fields` instead."
+                )
+            }
+        owned = sorted(_CONTACT_OWNED_QUERY_KEYS.intersection(filters))
+        if owned:
+            return {
+                "error": (
+                    f"filters may not contain {', '.join(owned)}: pass it as "
+                    "the named parameter instead, so it is validated."
+                )
+            }
+        # `key` is neither reserved nor owned, and Redmine's
+        # `api_key_from_request` prefers `params[:key]` over the
+        # `X-Redmine-API-Key` header python-redmine sets
+        # (`app/controllers/application_controller.rb:728-734` on 6.1.1), so
+        # until this allowlist a caller could read the instance as whoever owns
+        # the key they supplied. That matters most in `oauth` mode, where
+        # identity is meant to be bound to the request's bearer token.
+        unregistered_error = _reject_unregistered_filter_keys(
+            filters, _CONTACT_QUERY_FILTER_NAMES, _CONTACT_QUERY_ASSOCIATIONS
+        )
+        if unregistered_error:
+            return {"error": unregistered_error}
+        value_error = _reject_non_scalar_filter_values(filters)
+        if value_error:
+            return {"error": value_error}
+        params.update(filters)
     from .. import _client
 
     try:
         client = _get_redmine_client()
         url = f"{_client.REDMINE_URL}/contacts.json"
         payload = client.engine.request("get", url, params=params)
-        raw = payload.get("contacts", []) if isinstance(payload, dict) else []
-        return [_contact_to_dict(c) for c in raw[:limit]]
+        envelope = payload if isinstance(payload, dict) else {}
+        raw = envelope.get("contacts", [])
+        contacts = [
+            _contact_to_dict(
+                c,
+                include_custom_fields=include_custom_fields,
+                custom_field_ids=custom_field_ids,
+            )
+            for c in raw[:limit]
+        ]
+        if not include_pagination_info:
+            return contacts
+        return {
+            "contacts": contacts,
+            "pagination": _contact_pagination_info(
+                envelope, limit, offset, len(contacts), searched=search is not None
+            ),
+        }
     except Exception as e:
         return _handle_redmine_error(
             e, "listing contacts", {"resource_type": "contacts"}
         )
 
 
-async def _get_contact_action(
+@offloaded
+def _get_contact_action(
     contact_id: Optional[int] = None,
     include: Optional[str] = None,
     **_: Any,
@@ -164,7 +630,11 @@ async def _get_contact_action(
         contact = payload.get("contact", {}) if isinstance(payload, dict) else {}
         if not contact:
             return {"error": f"Contact {contact_id} not found."}
-        return _contact_to_dict(contact)
+        # A single-contact read keeps every custom field, the way
+        # `get_redmine_issue` does. The collection is where the cost is.
+        result = _contact_to_dict(contact, include_custom_fields=True)
+        result.update(_contact_includes_to_dict(contact))
+        return result
     except Exception as e:
         return _handle_redmine_error(
             e,
@@ -173,14 +643,15 @@ async def _get_contact_action(
         )
 
 
-async def _create_contact_action(
+@offloaded
+def _create_contact_action(
     project_id: Optional[Union[str, int]] = None,
     first_name: Optional[str] = None,
     last_name: Optional[str] = None,
     company: Optional[str] = None,
     email: Optional[str] = None,
     phone: Optional[str] = None,
-    is_company: bool = False,
+    is_company: Optional[bool] = None,
     visibility: int = 0,
     fields: Optional[Dict[str, Any]] = None,
     **_: Any,
@@ -194,6 +665,10 @@ async def _create_contact_action(
         }
     if not isinstance(first_name, str) or not first_name.strip():
         return {"error": "first_name must be a non-empty string."}
+    # Optional on the tool so that `list` can tell "not asked" from "people
+    # only"; a create that does not say still files a person, as it always has.
+    if is_company is None:
+        is_company = False
     if not isinstance(is_company, bool):
         return {"error": "is_company must be a boolean."}
     if visibility not in (0, 1, 2):
@@ -228,14 +703,19 @@ async def _create_contact_action(
             data=json.dumps({"contact": body}),
         )
         contact = payload.get("contact", {}) if isinstance(payload, dict) else {}
-        return _contact_to_dict(contact) if contact else {"success": True}
+        return (
+            _contact_to_dict(contact, include_custom_fields=True)
+            if contact
+            else {"success": True}
+        )
     except Exception as e:
         return _handle_redmine_error(
             e, "creating contact", {"resource_type": "contact"}
         )
 
 
-async def _update_contact_action(
+@offloaded
+def _update_contact_action(
     contact_id: Optional[int] = None,
     fields: Optional[Dict[str, Any]] = None,
     **_: Any,
@@ -276,7 +756,8 @@ async def _update_contact_action(
         )
 
 
-async def _delete_contact_action(
+@offloaded
+def _delete_contact_action(
     contact_id: Optional[int] = None,
     **_: Any,
 ) -> Dict[str, Any]:
@@ -301,7 +782,8 @@ async def _delete_contact_action(
         )
 
 
-async def _assign_contact_to_project_action(
+@offloaded
+def _assign_contact_to_project_action(
     contact_id: Optional[int] = None,
     project_id: Optional[Union[str, int]] = None,
     **_: Any,
@@ -339,7 +821,8 @@ async def _assign_contact_to_project_action(
         )
 
 
-async def _remove_contact_from_project_action(
+@offloaded
+def _remove_contact_from_project_action(
     contact_id: Optional[int] = None,
     project_id: Optional[Union[str, int]] = None,
     **_: Any,
@@ -395,10 +878,7 @@ async def _manage_contact_dispatch(action: str, **kwargs: Any) -> Any:
     }
 
 
-@mcp.tool(
-    title="Manage Contact",
-    annotations=MANAGE_ANNOTATIONS,
-)
+@mcp.tool(tags={plugin_tag("crm")})
 async def manage_contact(
     action: Literal[
         "list",
@@ -413,17 +893,25 @@ async def manage_contact(
     search: Optional[str] = None,
     tags: Optional[str] = None,
     assigned_to_id: Optional[int] = None,
+    author_id: Optional[int] = None,
     limit: Annotated[int, Field(ge=1, le=100)] = 100,
+    offset: Annotated[int, Field(ge=0)] = 0,
+    include_pagination_info: bool = False,
+    include_custom_fields: bool = False,
+    custom_field_ids: Optional[List[int]] = None,
     contact_id: Optional[int] = None,
     include: Optional[str] = None,
     first_name: Optional[str] = None,
     last_name: Optional[str] = None,
+    middle_name: Optional[str] = None,
     company: Optional[str] = None,
+    job_title: Optional[str] = None,
     email: Optional[str] = None,
     phone: Optional[str] = None,
-    is_company: bool = False,
+    is_company: Optional[bool] = None,
     visibility: int = 0,
     fields: Optional[Dict[str, Any]] = None,
+    filters: Optional[Dict[str, Any]] = None,
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """RedmineUP CRM (Contacts) plugin tool. Combined CRUD-by-action.
 
@@ -431,6 +919,122 @@ async def manage_contact(
     ``assign_to_project``, ``remove_from_project``.
 
     Requires ``REDMINE_CRM_ENABLED=true`` and the RedmineUP CRM plugin.
+
+    One flat signature serves every action, so most parameters apply to some
+    actions and are ignored by the rest.
+
+    ``search``, ``tags`` and ``assigned_to_id`` narrow a ``list`` on every CRM
+    build. The contact attributes narrow one only on the plugin's Pro build,
+    which registers them as query filters; the Light build registers ``tags``
+    and nothing else, and Redmine drops an unregistered filter parameter
+    silently, answering with the unfiltered collection. They are therefore
+    refused unless ``REDMINE_CRM_EDITION=pro`` says the Pro build is installed
+    -- an explicit error rather than a quietly wrong list.
+
+    Which parameter belongs to which action:
+
+    Args:
+        action: Which operation to run. One of ``list``, ``get``, ``create``,
+            ``update``, ``delete``, ``assign_to_project``,
+            ``remove_from_project``.
+        contact_id: The contact to act on. Required by every action except
+            ``list`` and ``create``.
+        project_id: On ``list``, restrict to contacts in this project. On
+            ``create``, the project to file the new contact under (required).
+            On ``assign_to_project`` / ``remove_from_project``, the project to
+            attach or detach.
+        search: ``list`` only. Free-text search over name, company and email.
+            Note that Redmine applies it to the page it returns without
+            narrowing the reported total, so paging through a search is
+            unreliable for more than one page.
+        tags: ``list`` only. Comma-separated tag filter.
+        assigned_to_id: ``list`` only. Filter by the assigned user's ID.
+        author_id: ``list`` only. Filter by the ID of the user who created the
+            contact. Needs ``REDMINE_CRM_EDITION=pro``.
+        limit: ``list`` only. Contacts per call, capped at 100 by Redmine.
+        offset: ``list`` only. Contacts to skip, for paging past the first 100.
+        include_custom_fields: ``list`` only. Return each contact's
+            ``custom_fields`` values (default: False). Costs no extra request
+            -- the CRM API sends them whether or not they are asked for -- but
+            it is the larger half of a contact row, because every custom field
+            the instance defines is rendered on every contact, carrying a
+            value or not. Without it a listed contact still carries
+            ``custom_fields``, holding ``None``, beside
+            ``custom_fields_count`` saying how many were withheld: ``None``
+            means "not requested" and ``[]`` means "this contact has none".
+            A ``get`` returns the values always, so read one contact in full
+            rather than turning this on to see one field.
+        custom_field_ids: ``list`` only. Return only these custom fields in
+            each contact's ``custom_fields``, e.g. ``[42, 43]``; implies
+            ``include_custom_fields``. The IDs are the ``id`` of each
+            ``custom_fields`` entry, the same number as in a ``cf_42`` filter.
+            ``[]`` means the contact carries none of them; an ID no contact
+            carries is not an error.
+        include_pagination_info: ``list`` only. Return
+            ``{"contacts": [...], "pagination": {...}}`` rather than a bare
+            list (default: False), with the keys ``list_redmine_issues``
+            returns. ``total`` is ``null`` whenever Redmine reported no total
+            that measures the collection being paged -- read it as "not
+            reported", never as a number, and note that passing ``search`` is
+            one such case. ``has_next`` is always a boolean, never ``null``,
+            so it is safe to loop on.
+        include: ``get`` only. Comma-separated, any of ``notes``,
+            ``contacts`` (a company's people, as ``{id, name}``), ``deals``
+            and ``issues`` (issues linked to the contact) -- the four the
+            plugin renders on request, each under its own key. Redmine
+            ignores any other name without an error. The plugin leaves
+            an array out when it is empty or the caller may not see it --
+            ``deals`` needs ``view_deals`` and ``issues`` ``view_issues`` --
+            so an absent key means "none visible", not an error.
+        first_name: Required on ``create``. Filters a ``list`` where
+            ``REDMINE_CRM_EDITION=pro``.
+        last_name: ``create`` attribute. Filters a ``list`` where
+            ``REDMINE_CRM_EDITION=pro``.
+        middle_name: ``create`` attribute. Filters a ``list`` where
+            ``REDMINE_CRM_EDITION=pro``.
+        company: ``create`` attribute. Filters a ``list`` where
+            ``REDMINE_CRM_EDITION=pro``.
+        job_title: ``create`` attribute. Filters a ``list`` where
+            ``REDMINE_CRM_EDITION=pro``.
+        email: ``create`` attribute. Filters a ``list`` where
+            ``REDMINE_CRM_EDITION=pro``.
+        phone: ``create`` attribute. Filters a ``list`` where
+            ``REDMINE_CRM_EDITION=pro``.
+        is_company: On ``create``, ``true`` files the record as a company
+            rather than a person (default: a person). On ``list``, ``true``
+            returns only companies and ``false`` only people; left out, both.
+            Filters a ``list`` where ``REDMINE_CRM_EDITION=pro``.
+        visibility: ``create`` only. ``0`` project, ``1`` public, ``2``
+            private.
+        fields: ``create`` and ``update`` only. Contact attributes to write.
+        filters: ``list`` only. Additional Redmine query parameters, for
+            filters this signature does not name -- most usefully
+            ``{"cf_42": "value"}`` to filter on a contact custom field. What a
+            build registers as a filter is the build's own business, so this
+            cannot promise any key works: confirm a narrow filter actually
+            narrowed. A contact custom field needs its "Used as a filter"
+            setting on, and on the Light edition no contact custom field is
+            ever a registered filter. Accepted keys are the filters
+            ``ContactQuery`` registers, plus ``cf_<id>``, ``author.cf_<id>``
+            and ``assigned_to.cf_<id>``; any other key is refused, with an
+            error naming what it objected to. Keys this signature already names
+            are rejected too -- pass them as the named parameter so they are
+            validated -- as are ``fields``, ``f`` and ``query_id``, which
+            Redmine reads as the query's own definition and which discard every
+            filter built from the rest of the request. Each value is one scalar
+            -- a string, number, date or datetime, never a list, a dict,
+            ``None`` or a ``bool`` (write a yes/no filter as ``"1"``).
+
+    Returns:
+        ``list`` a list of contact dicts -- or, with
+        ``include_pagination_info=True``, a dict of ``contacts`` and
+        ``pagination`` -- ``get`` / ``create`` one contact dict, the remaining
+        actions a status dict, and ``{"error": ...}`` on failure. ``get``
+        adds the ``include`` arrays it was given, when present. A listed
+        contact carries ``custom_fields`` values only under
+        ``include_custom_fields`` or ``custom_field_ids``, and otherwise
+        ``None`` plus ``custom_fields_count``; ``get`` and ``create`` always
+        carry the values.
     """
     if not _is_crm_enabled():
         return dict(_CRM_DISABLED_ERROR)
@@ -440,15 +1044,63 @@ async def manage_contact(
         search=search,
         tags=tags,
         assigned_to_id=assigned_to_id,
+        author_id=author_id,
         limit=limit,
+        offset=offset,
+        include_pagination_info=include_pagination_info,
+        include_custom_fields=include_custom_fields,
+        custom_field_ids=custom_field_ids,
         contact_id=contact_id,
         include=include,
         first_name=first_name,
         last_name=last_name,
+        middle_name=middle_name,
         company=company,
+        job_title=job_title,
         email=email,
         phone=phone,
         is_company=is_company,
         visibility=visibility,
         fields=fields,
+        filters=filters,
     )
+
+
+def _contact_tag_to_dict(tag: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialize one entry of GET /contacts_tags.json (id, name, color)."""
+    if not isinstance(tag, dict):
+        return {}
+    return {"id": tag.get("id"), "name": tag.get("name", ""), "color": tag.get("color")}
+
+
+@offloaded
+def _list_contact_tags_impl() -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    from .. import _client
+
+    try:
+        client = _get_redmine_client()
+        payload = client.engine.request(
+            "get", f"{_client.REDMINE_URL}/contacts_tags.json"
+        )
+        raw = payload.get("tags", []) if isinstance(payload, dict) else []
+        return [_contact_tag_to_dict(t) for t in raw]
+    except Exception as e:
+        return _handle_redmine_error(
+            e, "listing contact tags", {"resource_type": "contact tags"}
+        )
+
+
+@mcp.tool(tags={plugin_tag("crm")})
+async def list_contact_tags() -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    """List the tags in use on RedmineUP CRM contacts.
+
+    Use it to discover valid names for the ``tags`` filter of
+    ``manage_contact(action="list")`` and for ``tag_list`` on create/update.
+    Requires ``REDMINE_CRM_ENABLED=true``.
+
+    Returns:
+        A list of ``{id, name, color}`` ordered by name, or ``{"error": ...}``.
+    """
+    if not _is_crm_enabled():
+        return dict(_CRM_DISABLED_ERROR)
+    return await _list_contact_tags_impl()

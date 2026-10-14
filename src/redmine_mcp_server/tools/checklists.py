@@ -3,12 +3,13 @@
 import json
 from typing import Any, Dict, List, Optional
 
-from .._annotations import CREATE_ANNOTATIONS, MUTATE_ANNOTATIONS, READ_ONLY_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._env import _is_checklists_enabled, _is_read_only_mode
 from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
+from .._offload import offloaded
 from .._serialization import wrap_insecure_content
 from .._validation import _is_positive_int
+from .._plugin_visibility import plugin_tag
 from ..server import mcp
 
 
@@ -79,11 +80,9 @@ def _create_checklist_item_api(issue_id: int, payload: Dict[str, Any]) -> Any:
     )
 
 
-@mcp.tool(
-    title="Get Checklist",
-    annotations=READ_ONLY_ANNOTATIONS,
-)
-async def get_checklist(issue_id: int) -> Dict[str, Any]:
+@mcp.tool(tags={plugin_tag("checklists")})
+@offloaded
+def get_checklist(issue_id: int) -> Dict[str, Any]:
     """Retrieve all checklist items for a Redmine issue.
 
     Requires the RedmineUP Checklists plugin and
@@ -124,11 +123,9 @@ async def get_checklist(issue_id: int) -> Dict[str, Any]:
         )
 
 
-@mcp.tool(
-    title="Update Checklist Item",
-    annotations=MUTATE_ANNOTATIONS,
-)
-async def update_checklist_item(
+@mcp.tool(tags={plugin_tag("checklists")})
+@offloaded
+def update_checklist_item(
     checklist_item_id: int,
     subject: Optional[str] = None,
     is_done: Optional[bool] = None,
@@ -198,11 +195,9 @@ async def update_checklist_item(
         )
 
 
-@mcp.tool(
-    title="Create Checklist Item",
-    annotations=CREATE_ANNOTATIONS,
-)
-async def create_checklist_item(
+@mcp.tool(tags={plugin_tag("checklists")})
+@offloaded
+def create_checklist_item(
     issue_id: int,
     subject: str,
     is_section: bool = False,

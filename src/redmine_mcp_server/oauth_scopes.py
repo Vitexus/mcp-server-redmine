@@ -20,14 +20,28 @@ Exclusions:
       per-permission checks; default-advertising it would mean every
       consent screen requests full administrative access.
     - Vendor plugin scopes (Easy Redmine, RedmineUP, agile, checklists,
-      CRM, products) are excluded. They vary by deployment; advertising
-      scopes a Redmine doesn't recognize causes consent errors.
+      CRM, products) are excluded from ``READ_SCOPES`` and
+      ``WRITE_SCOPES``. They vary by deployment; advertising scopes a
+      Redmine doesn't recognize causes consent errors. Where a tool
+      cannot function without them, they live in a feature-gated list
+      (``AGILE_READ_SCOPES``, ``TAGS_READ_SCOPES``,
+      ``TAGS_WRITE_SCOPES``, ``CRM_READ_SCOPES``, ``CRM_WRITE_SCOPES``,
+      ``DEALS_READ_SCOPES``, ``DEALS_WRITE_SCOPES``,
+      ``CRM_NOTES_WRITE_SCOPES``)
+      and are advertised only when that feature's env flag is set.
 """
 
 import os
 from typing import Dict, Optional, Union
 
-from ._env import _is_agile_enabled, _is_read_only_mode, _is_tags_enabled
+from ._env import (
+    _is_agile_enabled,
+    _is_crm_enabled,
+    _is_deals_enabled,
+    _is_helpdesk_tickets_enabled,
+    _is_read_only_mode,
+    _is_tags_enabled,
+)
 
 # Redmine permissions used by the read-only MCP tools.
 READ_SCOPES: list[str] = [
@@ -46,6 +60,7 @@ READ_SCOPES: list[str] = [
     "view_documents",  # manage_document(action=list|get)
     "view_files",  # get_redmine_attachment, list_files
     "view_wiki_pages",  # manage_redmine_wiki_page(action=get|list)
+    "view_news",  # list_redmine_news, get_redmine_news
     "view_time_entries",  # list_time_entries, list_time_entry_activities
     "view_private_notes",  # get_private_notes
     "view_issue_watchers",  # get_redmine_issue(include_watchers=True)
@@ -53,7 +68,8 @@ READ_SCOPES: list[str] = [
 
 # Redmine permissions used by the mutation MCP tools.
 WRITE_SCOPES: list[str] = [
-    "add_issues",  # create_redmine_issue, copy_issue
+    "add_issues",  # create_redmine_issue; copy_issue (target project)
+    "copy_issues",  # copy_issue (Redmine copy_from / allowed_to?(:copy_issues))
     "edit_issues",  # update_redmine_issue
     "delete_issues",  # delete_redmine_issue
     "manage_subtasks",  # update_redmine_issue when parent_issue_id changes
@@ -75,8 +91,30 @@ WRITE_SCOPES: list[str] = [
     "edit_documents",  # manage_document(action=update)
     "delete_documents",  # advertised for parity; manage_document has no
     # delete action yet
+    "manage_news",  # manage_redmine_news, delete_redmine_news -- Redmine has
+    # no separate create/edit/delete split for news
     "manage_files",  # upload_file, delete_file
     "manage_members",  # manage_project_member
+    # --- the project record itself: manage_redmine_project ---
+    "add_project",  # manage_redmine_project(action=create)
+    "add_subprojects",  # manage_redmine_project(action=create) with parent_id;
+    # Redmine gates a subproject on the parent's
+    # add_subprojects rather than on add_project
+    "edit_project",  # manage_redmine_project(action=update)
+    "close_project",  # manage_redmine_project(action=close|reopen)
+    # The two permissions below gate a *safe attribute*, not an endpoint:
+    # Project's safe_attributes blocks require select_project_publicity for
+    # is_public and select_project_modules for enabled_module_names. Redmine
+    # silently drops an attribute the caller may not set instead of refusing
+    # the request, so a token without them still edits every other field.
+    # Advertised so a token can carry them, and deliberately not required in
+    # TOOL_SCOPES -- advertised is not the same as required.
+    "select_project_publicity",  # manage_redmine_project is_public
+    "select_project_modules",  # manage_redmine_project enabled_module_names
+    # archive/unarchive are absent by design: Redmine gates
+    # ProjectsController#archive and #unarchive on require_admin, and admin is
+    # never advertised (see the module docstring). delete_project is absent
+    # because no tool deletes a project.
 ]
 
 # RedmineUP Agile plugin permissions, advertised only when the agile
@@ -108,6 +146,114 @@ TAGS_WRITE_SCOPES: list[str] = [
     "edit_issue_tags",
 ]
 
+# RedmineUP CRM plugin permissions, advertised only when the CRM feature is
+# explicitly enabled (see below). Kept out of READ_SCOPES so a deployment
+# without the plugin never advertises a scope Redmine can't resolve.
+#
+# manage_contact cannot reach Redmine without these. Redmine intersects the
+# token's scopes with the user's role permissions -- Role#allowed_permissions
+# is literally ``unscoped & scope`` -- and every contacts endpoint the tool
+# calls runs a scope-aware authorization check: ContactsController#index via
+# find_optional_project -> authorize_global, #show via Contact#visible?, and
+# create / update / destroy via authorize, Contact#editable? and
+# Contact#deletable?. With the scopes absent from the token, all seven
+# manage_contact actions are denied even for a user whose Redmine role grants
+# the permission.
+CRM_READ_SCOPES: list[str] = [
+    "view_contacts",  # manage_contact(action=list|get): the plugin maps
+    # contacts#index and contacts#show to this permission.
+    "view_private_contacts",  # Contact.visible_condition also consults this
+    # for visibility=2 contacts. Without it, list
+    # and get silently omit private contacts that
+    # the user's role can otherwise see.
+]
+
+# RedmineUP CRM write permissions, advertised only when the CRM feature is
+# enabled AND the server is not read-only, matching the WRITE action modes
+# manage_contact declares.
+CRM_WRITE_SCOPES: list[str] = [
+    "add_contacts",  # manage_contact(action=create)
+    "edit_contacts",  # manage_contact(action=update), and both association
+    # actions: the plugin maps contacts_projects#create
+    # and #destroy to edit_contacts, and
+    # ContactsProjectsController checks it directly.
+    "delete_contacts",  # manage_contact(action=delete)
+]
+
+# RedmineUP CRM *deals* permissions, advertised only when the deals feature is
+# explicitly enabled. Deals ship inside the CRM plugin but get their own flag
+# rather than riding REDMINE_CRM_ENABLED, because the plugin's Light edition
+# declares no ``project_module :deals`` and therefore none of these
+# permissions. Redmine derives its OAuth scopes from
+# ``Redmine::AccessControl.permissions`` and applies
+# ``enforce_configured_scopes``, so on a Light install these names are not
+# valid scopes at all: the OAuth application cannot hold them and a client
+# requesting one fails consent with invalid_scope -- which would take
+# manage_contact down with it. Gating separately keeps a Light deployment that
+# already sets REDMINE_CRM_ENABLED working untouched.
+#
+# manage_deal cannot reach Redmine without these. DealsController runs
+# ``before_action :authorize, :except => [:index]``, so #show / #create /
+# #update / #destroy are denied outright.
+# #index is authorized too, but through a different path -- DealsController
+# excludes it from ``before_action :authorize`` and then runs
+# ``find_optional_project``, whose Redmine implementation calls
+# ``authorize_global``. So every action is denied without the permission;
+# ``Deal.visible`` narrows what a permitted caller sees, it does not stand in
+# for the check.
+DEALS_READ_SCOPES: list[str] = [
+    "view_deals",  # manage_deal(action=list|get): the plugin maps deals#index
+    # and deals#show to this permission. Declared
+    # ``:read => true``, so it also applies in closed and
+    # archived projects. Also list_deal_statuses: deal_categories#index
+    # maps to it; deal_statuses#index is admin-only and no scope grants it.
+]
+
+# RedmineUP CRM deal write permissions, advertised only when the deals feature
+# is enabled AND the server is not read-only, matching the WRITE action modes
+# manage_deal declares.
+DEALS_WRITE_SCOPES: list[str] = [
+    "add_deals",  # manage_deal(action=create): deals#create
+    "edit_deals",  # manage_deal(action=update): deals#update
+    "delete_deals",  # manage_deal(action=delete): deals#destroy
+    "manage_deals",  # manage_deal_category(action=create|update|delete)
+]
+
+# RedmineUP CRM note permissions, advertised when contacts or deals are
+# enabled and the server is not read-only. Reads reuse view_contacts /
+# view_deals. notes#create has no authorize filter in the plugin, so
+# add_notes is advertised for least surprise rather than because Redmine
+# will intersect on it; notes#update and #destroy do check delete_notes.
+CRM_NOTES_WRITE_SCOPES: list[str] = [
+    "add_notes",  # manage_crm_note(action=create)
+    "delete_notes",  # manage_crm_note(action=update|delete)
+    "delete_own_notes",  # same, for the note's author
+]
+
+# RedmineUP Helpdesk ticket permissions, advertised only when
+# REDMINE_HELPDESK_TICKETS_ENABLED is set (#378). The flag is separate from
+# REDMINE_HELPDESK_ENABLED so that upgrading a deployment that only uses
+# send_helpdesk_email_reply advertises nothing new: a Redmine OAuth
+# application that does not grant an advertised scope fails consent with
+# invalid_scope for the whole list.
+#
+# HelpdeskTicketsController runs ``before_action :authorize`` on show and
+# update, and the plugin maps helpdesk_tickets#show to view_helpdesk_tickets
+# and #update to edit_helpdesk_tickets. manage_helpdesk_ticket(set_contact)
+# also looks the contact up through the CRM plugin, which maps contacts#index
+# and #show to view_contacts; view_private_contacts keeps private contacts
+# from silently dropping out of that search (the same gap noted for CRM
+# above). advertised_scopes() deduplicates against the CRM lists.
+HELPDESK_TICKETS_READ_SCOPES: list[str] = [
+    "view_helpdesk_tickets",  # manage_helpdesk_ticket(action=get|set_contact)
+    "view_contacts",  # manage_helpdesk_ticket(action=set_contact) lookup
+    "view_private_contacts",  # same lookup, private contacts
+]
+
+HELPDESK_TICKETS_WRITE_SCOPES: list[str] = [
+    "edit_helpdesk_tickets",  # manage_helpdesk_ticket(action=set_contact)
+]
+
 
 def advertised_scopes() -> list[str]:
     """Return the OAuth scopes to advertise in discovery documents.
@@ -121,8 +267,22 @@ def advertised_scopes() -> list[str]:
     non-agile Redmine never sees an unrecognized plugin scope. The same
     applies to :data:`TAGS_READ_SCOPES` under ``REDMINE_TAGS_ENABLED``;
     :data:`TAGS_WRITE_SCOPES` are additionally appended unless the server
-    is read-only, since they gate ``tag_list`` writes. Always returns a
-    fresh list so callers cannot mutate the source of truth.
+    is read-only, since they gate ``tag_list`` writes. :data:`CRM_READ_SCOPES`
+    follow the same rule under ``REDMINE_CRM_ENABLED`` (per
+    :func:`_is_crm_enabled`), with :data:`CRM_WRITE_SCOPES` appended unless
+    the server is read-only, since ``manage_contact`` cannot pass Redmine's
+    authorization checks without them. :data:`DEALS_READ_SCOPES` and
+    :data:`DEALS_WRITE_SCOPES` follow the same shape under a flag of their
+    own, ``REDMINE_DEALS_ENABLED`` (per :func:`_is_deals_enabled`), because
+    the CRM plugin's Light edition does not define the deal permissions at
+    all. :data:`HELPDESK_TICKETS_READ_SCOPES` and
+    :data:`HELPDESK_TICKETS_WRITE_SCOPES` follow the same shape under
+    ``REDMINE_HELPDESK_TICKETS_ENABLED``. Extensions registered through
+    :mod:`.extensions` append their own lists last, under the same
+    enabled/read-only rule, which is where a
+    permission an in-house plugin declares for itself enters the list.
+    Always returns a fresh list so callers cannot mutate the source of
+    truth.
     """
     if _is_read_only_mode():
         scopes = list(READ_SCOPES)
@@ -134,7 +294,34 @@ def advertised_scopes() -> list[str]:
         scopes += list(TAGS_READ_SCOPES)
         if not _is_read_only_mode():
             scopes += list(TAGS_WRITE_SCOPES)
-    return scopes
+    if _is_crm_enabled():
+        scopes += list(CRM_READ_SCOPES)
+        if not _is_read_only_mode():
+            scopes += list(CRM_WRITE_SCOPES)
+    if _is_deals_enabled():
+        scopes += list(DEALS_READ_SCOPES)
+        if not _is_read_only_mode():
+            scopes += list(DEALS_WRITE_SCOPES)
+    if (_is_crm_enabled() or _is_deals_enabled()) and not _is_read_only_mode():
+        scopes += list(CRM_NOTES_WRITE_SCOPES)
+    if _is_helpdesk_tickets_enabled():
+        scopes += list(HELPDESK_TICKETS_READ_SCOPES)
+        if not _is_read_only_mode():
+            scopes += list(HELPDESK_TICKETS_WRITE_SCOPES)
+
+    # Registered extensions come last, in registration order, so a stock
+    # deployment -- where there are none -- gets exactly the list above.
+    # Imported here rather than at module scope because this function runs
+    # while ``server`` is still executing its own body, building the auth
+    # provider; ``_extension_registry`` is the half of ``extensions`` that
+    # carries no ``.server`` import, so reading it here cannot close a cycle.
+    from ._extension_registry import extension_advertised_scopes
+
+    scopes += extension_advertised_scopes()
+    # An extension may well need a permission already advertised above.
+    # dict.fromkeys keeps the first occurrence, so deduplicating cannot
+    # reorder this module's own scopes.
+    return list(dict.fromkeys(scopes))
 
 
 def configured_advertised_scopes() -> list[str]:
@@ -207,12 +394,31 @@ TOOL_SCOPES: Dict[str, ToolScopeEntry] = {
     "list_project_members": frozenset({"view_members"}),
     # GET /roles.json needs authentication only.
     "list_redmine_roles": frozenset(),
-    # GET /custom_fields.json is admin-gated by Redmine itself.
-    "list_project_issue_custom_fields": frozenset(),
+    # Reads GET /projects/{id}.json?include=issue_custom_fields, so it needs
+    # view_project for projects#show. Redmine up to 6.1.3 and 7.0.0 renders
+    # the include with no permission check, so requiring view_issues would
+    # refuse calls those versions serve, and hide the tool from tools/list for
+    # those tokens. 6.1.4 and 7.0.1 omit the array without view_issues on the
+    # project, and the tool reports that omission as an error rather than [].
+    # view_project being :public => true is not an exemption:
+    # Role#allowed_permissions intersects the public permissions with the
+    # token's scopes too, so a token carrying no scopes is still refused. Not
+    # /custom_fields.json, never called here.
+    "list_project_issue_custom_fields": frozenset({"view_project"}),
     "manage_project_member": frozenset({"manage_members"}),
     # Redmine gates GET /projects/.../versions.json on view_issues.
     "list_redmine_versions": frozenset({"view_issues"}),
     "manage_redmine_version": frozenset({"manage_versions"}),
+    # Each action's own endpoint gate, and nothing more. add_subprojects is
+    # argument-conditional (create with a parent_id), and the two
+    # select_project_* permissions gate individual fields, so both stay with
+    # Redmine's own checks per the boundary stated above.
+    "manage_redmine_project": {
+        "create": frozenset({"add_project"}),
+        "update": frozenset({"edit_project"}),
+        "close": frozenset({"close_project"}),
+        "reopen": frozenset({"close_project"}),
+    },
     # --- issues ---
     "list_redmine_issues": frozenset({"view_issues"}),
     "get_redmine_issue": frozenset({"view_issues"}),
@@ -220,8 +426,12 @@ TOOL_SCOPES: Dict[str, ToolScopeEntry] = {
     "list_redmine_queries": frozenset({"view_issues"}),
     "get_gantt_chart": frozenset({"view_issues"}),
     "search_redmine_issues": frozenset({"search_project"}),
+    # A custom field passed by name in `fields` is resolved by reading
+    # projects#show (view_project) -- and, on update, issues#show
+    # (view_issues) first. Argument-conditional, so not required here; the
+    # tools report a denied lookup themselves and write nothing.
     "create_redmine_issue": frozenset({"add_issues"}),
-    "copy_issue": frozenset({"add_issues"}),
+    "copy_issue": frozenset({"view_issues", "copy_issues", "add_issues"}),
     "update_redmine_issue": frozenset({"edit_issues"}),
     "delete_redmine_issue": frozenset({"delete_issues"}),
     "get_private_notes": frozenset({"view_issues", "view_private_notes"}),
@@ -252,12 +462,24 @@ TOOL_SCOPES: Dict[str, ToolScopeEntry] = {
     "list_redmine_issue_priorities": frozenset(),
     # GET /users.json is admin-gated by Redmine itself.
     "list_redmine_users": frozenset(),
+    # GET /users/current.json is exempt from UsersController's require_admin
+    # filter and resolves 'current' behind a bare require_login, so any token
+    # may call it. include_memberships does not change that: the memberships
+    # block in app/views/users/show.api.rsb has no permission check, and
+    # Redmine already narrows the list with Project.visible_condition for the
+    # caller. view_members would be the wrong scope to require -- it gates
+    # GET /projects/:id/memberships.json, i.e. reading who else is a member,
+    # and demanding it would deny a call Redmine itself allows.
     "get_current_user": frozenset(),
     # --- meta ---
     "get_mcp_server_info": frozenset(),
     # --- files / attachments ---
     "get_redmine_attachment": frozenset({"view_files"}),
     "list_files": frozenset({"view_files"}),
+    # Reserves a local staging slot and hands back a single-use ticket; it
+    # touches no Redmine resource. Whatever the staged file is later
+    # attached to is scoped where that attach happens.
+    "create_upload_ticket": frozenset(),
     "upload_file": frozenset({"manage_files"}),
     "delete_file": frozenset({"manage_files"}),
     # Local attachment-store maintenance; no Redmine call. Registered
@@ -287,22 +509,68 @@ TOOL_SCOPES: Dict[str, ToolScopeEntry] = {
         "create": frozenset({"log_time"}),
         "update": frozenset({"edit_time_entries"}),
     },
+    # --- news ---
+    "list_redmine_news": frozenset({"view_news"}),
+    "get_redmine_news": frozenset({"view_news"}),
+    # Redmine gates every news mutation behind the single manage_news
+    # permission, so the per-action split carries the same scope twice
+    # rather than pretending there is a finer one.
+    "manage_redmine_news": {
+        "create": frozenset({"manage_news"}),
+        "update": frozenset({"manage_news"}),
+    },
+    "delete_redmine_news": frozenset({"manage_news"}),
     # --- checklists (RedmineUP plugin; vendor scopes are not advertised,
     # so gate on the host-issue permissions; the plugin's own
     # view_checklists/edit_checklists checks remain with Redmine) ---
     "get_checklist": frozenset({"view_issues"}),
     "create_checklist_item": frozenset({"edit_issues"}),
     "update_checklist_item": frozenset({"edit_issues"}),
-    # --- products / CRM (RedmineUP plugins; vendor scopes are not
-    # advertised and cannot be required; Redmine enforces its own
-    # plugin permissions) ---
+    # --- helpdesk (RedmineUP plugin; the reply is recorded as an issue
+    # journal, so gate on add_issue_notes. The plugin's endpoint checks no
+    # permission of its own (#301), so this scope is the only one in play;
+    # a status_id change is left to Redmine) ---
+    "send_helpdesk_email_reply": frozenset({"add_issue_notes"}),
+    # Helpdesk tickets (#378). Both actions read /issues/:id first (the
+    # plugin's own lookup skips issue visibility), then helpdesk_tickets#show,
+    # which only view_helpdesk_tickets grants; set_contact adds the contact
+    # lookup and helpdesk_tickets#update. The scopes are advertised under the
+    # same flag that makes the tool visible, so requiring them cannot hide it
+    # on a deployment that never advertises them.
+    "manage_helpdesk_ticket": {
+        "get": frozenset({"view_issues", "view_helpdesk_tickets"}),
+        "set_contact": frozenset(
+            {
+                "view_issues",
+                "view_helpdesk_tickets",
+                "edit_helpdesk_tickets",
+                "view_contacts",
+            }
+        ),
+    },
+    # --- products / CRM (RedmineUP plugins; Redmine enforces its own
+    # plugin permissions, so these stay unrequired here. CRM scopes ARE
+    # advertised when REDMINE_CRM_ENABLED is set, so the token can reach
+    # the contacts and deals endpoints at all, but requiring them in this
+    # map would gate the tool on a scope that a CRM-disabled deployment
+    # never advertises; the same applies to manage_deal under
+    # REDMINE_DEALS_ENABLED. Product scopes are not advertised at all yet.) ---
     "manage_product": frozenset(),
     "manage_contact": frozenset(),
+    "list_contact_tags": frozenset(),
+    "manage_deal": frozenset(),
+    "list_deal_statuses": frozenset(),
+    "manage_deal_category": frozenset(),
+    "add_deal_product": frozenset(),
+    "manage_crm_note": frozenset(),
+    "list_crm_queries": frozenset(),
     # --- MCP Apps (read-only issue queries) ---
     "show_triage_board": frozenset({"view_issues"}),
     "get_triage_board_data": frozenset({"view_issues"}),
     "show_project_dashboard": frozenset({"view_issues"}),
     "get_project_dashboard_data": frozenset({"view_issues"}),
+    "show_project_timeline": frozenset({"view_issues"}),
+    "get_project_timeline_data": frozenset({"view_issues"}),
 }
 
 

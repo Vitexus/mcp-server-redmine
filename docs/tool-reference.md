@@ -2,6 +2,88 @@
 
 Complete documentation for all available Redmine MCP Server tools.
 
+## Compatibility and Verification
+
+What the tools below have been run against, and what they have not.
+
+Core tools are verified against Redmine 6.1.1 and 7.0.0. Both are tested because 7.0
+adds fields that 6.x omits, and a serializer can pass on one version while failing on
+the other.
+
+Plugin-gated tools are verified against a live install of the plugin at the version
+listed:
+
+| Env flag | Plugin | Verified against |
+|---|---|---|
+| `REDMINE_AGILE_ENABLED` | RedmineUP Agile (Light) | 1.6.13 |
+| `REDMINE_CRM_ENABLED`, `REDMINE_DEALS_ENABLED` | RedmineUP CRM PRO | 4.4.7 |
+| `REDMINE_PRODUCTS_ENABLED` | RedmineUP Products | 2.2.9 |
+| `REDMINE_TAGS_ENABLED` | AlphaNodes additional_tags | 4.4.0 |
+| (wiki macro) | redmine_drawio | 1.5.5 |
+
+Two flags are missing from that table. `REDMINE_CHECKLISTS_ENABLED` (RedmineUP
+Checklists Pro) and `REDMINE_DMSF_ENABLED` (DMSF) are written against the plugin's
+API and covered by unit tests, but have never run against a real install. If you use
+either, a bug report with the raw JSON from the plugin endpoint is worth more than a
+description of what went wrong.
+
+`REDMINE_HELPDESK_ENABLED` (RedmineUP Helpdesk) is not in the table either: the
+sandboxes have no Helpdesk install. Its request and response shapes come from a
+Helpdesk 4.2.9 / Redmine 6.1.2 install, captured by the user who asked for the
+tool.
+
+Redmine distributions and forks such as Easy Redmine and Easy8 are not tested at all.
+They add and remove top-level fields relative to stock Redmine, so a tool may return
+less than your instance actually holds. Open an issue with a redacted raw response
+and I will take a look.
+
+## Error Results
+
+A tool that fails returns an error envelope and marks the call as failed:
+the MCP result carries `isError: true`, and the envelope sits in both
+`content` (as JSON text) and `structuredContent`. Tools whose return type is
+not a plain object carry it under `result` in `structuredContent`.
+
+```json
+{"error": "Access denied. Your Redmine user lacks the required permission for this action. Contact your Redmine administrator.", "code": "FORBIDDEN"}
+```
+
+`error` is a message for the reader, and some envelopes add a `hint` or other
+fields. `code` is always present and non-empty, and is the field to branch on.
+A successful call keeps `isError: false`, as does a result whose `error` is
+`null`.
+
+Codes returned for a failed Redmine request:
+
+| Code | Cause |
+|---|---|
+| `CONNECTION_FAILED` | Redmine could not be reached: connection refused, DNS failure |
+| `SSL_ERROR` | SSL/TLS handshake or certificate failure |
+| `TIMEOUT` | Connect or read timeout, including a download that stalled mid-body (see `REDMINE_TIMEOUT`) |
+| `AUTH_FAILED` | Redmine answered 401: the credentials or the bound API key were rejected |
+| `PER_USER_AUTH` | Per-user authentication could not resolve credentials for the caller |
+| `FORBIDDEN` | Redmine answered 403: the user lacks the permission |
+| `NOT_FOUND` | Redmine answered 404; some tools also use it for a resource they looked up and did not find |
+| `CONFLICT` | Redmine answered 409: the record changed since it was read |
+| `VALIDATION_FAILED` | Redmine answered 422 and rejected the submitted values |
+| `SERVER_ERROR` | Redmine answered with a 5xx status |
+| `PROTOCOL_MISMATCH` | `REDMINE_URL` uses the wrong scheme (`http` vs `https`) |
+| `VERSION_MISMATCH` | The feature needs a newer Redmine or plugin version |
+| `READ_ONLY` | A write was refused because `REDMINE_MCP_READ_ONLY=true` |
+| `UNKNOWN_ERROR` | Anything else, including a tool error that set no code of its own |
+
+Codes returned before a request is made:
+
+| Code | Cause |
+|---|---|
+| `INVALID_ARGUMENTS` | The arguments do not match the tool's schema |
+| `INSUFFICIENT_SCOPE` | The OAuth token lacks a scope the tool or action needs |
+| `TOOL_NOT_ALLOWED` | The tool is not on `REDMINE_MCP_ALLOW_TOOLS` |
+
+Some tools return their own codes, such as `CONFIRMATION_REQUIRED`,
+`CHILDREN_PRESENT` or `UPDATE_UNCONFIRMED`; each is documented with its tool
+below.
+
 ## Security Best Practices
 
 ### SSL/TLS Configuration
@@ -154,8 +236,8 @@ Block all write operations by setting the `REDMINE_MCP_READ_ONLY` environment va
 REDMINE_MCP_READ_ONLY=true
 ```
 
-When enabled, the following tools return an error instead of executing
-(write actions only — read actions within the same tool still work):
+When enabled, the following tools return an error with `code: "READ_ONLY"`
+instead of executing (write actions only — read actions within the same tool still work):
 
 **Fully blocked (all actions are writes):**
 - `create_redmine_issue`
@@ -163,6 +245,7 @@ When enabled, the following tools return an error instead of executing
 - `delete_redmine_issue`
 - `copy_issue`
 - `upload_file`
+- `create_upload_ticket`
 - `delete_file`
 - `import_time_entries`
 - `update_checklist_item` (also requires `REDMINE_CHECKLISTS_ENABLED=true`)
@@ -172,6 +255,11 @@ When enabled, the following tools return an error instead of executing
 - `manage_issue_note` — all actions
 - `manage_time_entry` — all actions
 - `manage_redmine_version` — all actions (`create`, `update`, `delete`)
+- `manage_redmine_project` — all actions (`create`, `update`, `close`, `reopen`)
+- `manage_redmine_news`: all actions (`create`, `update`)
+- `delete_redmine_news`
+- `add_deal_product` (also requires `REDMINE_DEALS_ENABLED=true` and `REDMINE_PRODUCTS_ENABLED=true`)
+- `send_helpdesk_email_reply` (also requires `REDMINE_HELPDESK_ENABLED=true`)
 
 **Partially blocked (read actions still work):**
 - `manage_redmine_wiki_page` — `create`, `update`, `delete`, `rename` blocked; `list`, `get` allowed
@@ -179,9 +267,117 @@ When enabled, the following tools return an error instead of executing
 - `manage_issue_relation` — `create`, `delete` blocked; `list` allowed
 - `manage_product` — `create`, `update` blocked; `list`, `get` allowed (also requires `REDMINE_PRODUCTS_ENABLED=true`)
 - `manage_contact` — `create`, `update`, `delete`, `assign_to_project`, `remove_from_project` blocked; `list`, `get` allowed (also requires `REDMINE_CRM_ENABLED=true`)
+- `manage_deal` — `create`, `update`, `delete` blocked; `list`, `get` allowed (also requires `REDMINE_DEALS_ENABLED=true`)
+- `manage_deal_category`: `create`, `update`, `delete` blocked; `list` allowed (also requires `REDMINE_DEALS_ENABLED=true`)
+- `manage_crm_note`: `create`, `update`, `delete` blocked; `get` allowed (also requires `REDMINE_CRM_ENABLED=true` or `REDMINE_DEALS_ENABLED=true`)
 - `manage_document` — `create`, `update` blocked; `list`, `get` allowed (also requires `REDMINE_DMSF_ENABLED=true`)
+- `manage_helpdesk_ticket`: `set_contact` blocked; `get` allowed (also requires `REDMINE_HELPDESK_TICKETS_ENABLED=true`)
 
 All read tools (`get_redmine_issue`, `list_redmine_issues`, `list_redmine_projects`, etc.) continue to work normally. The admin-gated `cleanup_attachment_files` tool (when registered via `REDMINE_MCP_EXPOSE_ADMIN_TOOLS=true`) is also unaffected — it performs local filesystem cleanup, not Redmine mutations.
+
+### Tool Allow List
+
+Expose only the tools a deployment actually needs by naming them in
+`REDMINE_MCP_ALLOW_TOOLS`:
+
+```bash
+# In .env file
+REDMINE_MCP_ALLOW_TOOLS=get_redmine_issue,list_redmine_issues,search_redmine_issues,list_subtasks,get_private_notes,get_current_user
+```
+
+Or, for longer lists, one name per line in a file (`#` starts a comment):
+
+```bash
+REDMINE_MCP_ALLOW_TOOLS_FILE=/etc/redmine-mcp/allowed-tools.txt
+```
+
+`REDMINE_MCP_ALLOW_TOOLS` takes precedence when it names at least one tool.
+Leaving both unset exposes every tool, as before; setting the variable to a
+value that names no tool at all (`""`, `","`) is a misconfiguration the
+server refuses to start on rather than guess about. An empty variable with
+`REDMINE_MCP_ALLOW_TOOLS_FILE` set falls through to the file, so a
+`docker-compose.yml` that renders an unset `${REDMINE_MCP_ALLOW_TOOLS}` as
+the empty string does not shadow it.
+
+Tools outside the list disappear from `tools/list` and `call_tool` refuses
+them with a `TOOL_NOT_ALLOWED` envelope. Enforcement is middleware, in the
+shape of the OAuth scope check: `on_list_tools` filters the list the
+framework hands it and `on_call_tool` checks the name it is given. Both work
+on data passed in, so there is no registry to read and nothing that widens
+the surface if FastMCP moves its internals — an allow list that fails open is
+worse than none, because the operator believes a restriction is in force
+while it is not.
+
+Three properties are worth knowing:
+
+- **It only narrows.** The middleware runs alongside plugin visibility rather
+  than replacing it and never enables anything, so a tool that is on the
+  allow list but hidden by its plugin flag stays hidden. Listing
+  `manage_deal` does not substitute for `REDMINE_DEALS_ENABLED=true`.
+- **Granularity is whole tools.** A `manage_X(action=...)` tool is allowed or
+  denied as a unit. To allow its read actions while blocking its writes, use
+  `REDMINE_MCP_READ_ONLY` (see [Read-Only Mode](#read-only-mode)) — the two
+  compose, and an allow list that includes write tools with read-only off is
+  how selective write access is expressed.
+- **A name matching no tool is warned about, not honoured.** Startup logs a
+  warning naming it, so a typo does not quietly fail to expose a tool. The
+  warning is best-effort — it reads a private FastMCP registry to tell a
+  misspelling from a real name and stays quiet if that ever moves — and it
+  never decides what is exposed. A list whose names are all misspelled
+  exposes nothing.
+
+Because this is enforced by the server rather than the client, it holds for
+every user of a shared deployment.
+
+### Extensions
+
+`REDMINE_MCP_EXTENSIONS` names Python modules imported at startup, each of
+which registers tools for a Redmine plugin written in house. Tools reaching
+the surface this way are not documented in this file — they belong to the
+deployment, not to this project — but the server-side rules above still
+hold for them:
+
+- Their tools carry a `plugin:<family>` tag and appear only while the
+  family's own env flag is on, exactly like the vendor plugin tools above.
+- Every one of them needs a `TOOL_SCOPES` entry, so the OAuth scope
+  middleware gates them like any other tool, and the allow list narrows
+  them like any other tool.
+- A per-action scope entry is checked against the tool's `action`
+  `Literal` at startup and must name each of its actions and nothing else,
+  because an action the map does not name would reach the plugin with no
+  scope check.
+- Any scope a family advertises must exist as a Redmine permission on the
+  target instance and be granted on the OAuth application, or consent fails
+  with `invalid_scope` for the whole list.
+- A name collision with a tool documented here fails startup instead of
+  replacing it, whether the extension claims the name in its spec or only
+  decorates a function with it.
+- Any scope such a family advertises reaches the served discovery documents
+  too, in `oauth`, `oauth-proxy` and `api-key-login` alike: the auth
+  provider is handed the widened list once the extension modules have
+  loaded, before the HTTP app is built.
+- Each registered family gets its own key in the `plugin_flags` dict
+  `get_mcp_server_info` returns, next to the built-in ones.
+- A family can also widen two of the issue tools while it is enabled: the
+  attributes `update_redmine_issue` writes rather than treating as custom
+  field names, and the filter names `list_redmine_issues` accepts, with the
+  query parameters those filters need. Values are validated as they are for
+  any other filter, and a filter name and a companion parameter may not be
+  the same thing in either direction -- including the `cf_<id>` spellings --
+  so nothing rides along that narrows a query the caller did not narrow. Registered
+  attributes reach Redmine on `create_redmine_issue` too: both write paths
+  share the step that would otherwise read the name as a custom field's.
+
+Two of this server's guarantees are not middleware, so an extension applies
+them in its own tools exactly as the built-in ones do.
+[Read-Only Mode](#read-only-mode) is enforced by `action_dispatch`, which
+refuses a write action while `REDMINE_MCP_READ_ONLY` is set; a tool that
+neither uses it nor calls `is_read_only_mode()` still writes.
+[Prompt Injection Protection](#prompt-injection-protection) is the returning
+tool calling `wrap_insecure_content` on each user-controlled field.
+
+Unset, nothing is imported. See [Extensions](extensions.md) for what a
+module looks like.
 
 ### Prompt Injection Protection
 
@@ -207,11 +403,20 @@ This allows LLM consumers to distinguish trusted tool output from untrusted user
 
 ### `list_redmine_projects`
 
-Lists all accessible projects in the Redmine instance.
+Lists accessible projects in the Redmine instance, optionally narrowed server-side.
 
-**Parameters:** None
+**Returns only *active* projects unless `filters` says otherwise.** Redmine's `ProjectQuery` starts with a `status = 1` filter already set (`self.filters ||= {'status' => {:operator => "=", :values => ['1']}}`), so a call passing no `status` answers with active projects alone while looking like the whole list. Pass `filters={"status": "1|5"}` for closed projects alongside active ones. This tool keeps Redmine's own default deliberately rather than overriding it. Only `1` (active) and `5` (closed) are reachable: archived and scheduled-for-deletion come from `ProjectAdminQuery`, which this endpoint does not use, and `status` is a `:list` filter taking only `=` and `!`, so `"*"` is read as a literal value and matches nothing.
 
-**Returns:** List of project dictionaries with id, name, identifier, and description
+**Parameters:**
+- `include_custom_fields` (boolean, optional): Add `custom_fields` to each project. Default: `false`
+- `limit` (integer, optional): Maximum number of projects to return, `1`–`1000`. Omitted by default, which returns every visible project -- and at `offset=0` omitting it is also the cheapest way to do that. With no limit python-redmine reads the collection's `total_count` and stops there; a supplied limit is paged in full regardless of how many projects exist, so `limit=1000` against an instance holding seven costs ten requests and returns the same seven. Ask for a number you want, not a large one meaning "all"
+- `offset` (integer, optional): Projects to skip before collecting results. Default: `0`. With no `limit`, a non-zero offset costs exactly what reading from zero costs: `bulk_request` resolves the missing limit to the collection's `total_count` and then pages that many rows *from* `offset` rather than up to the end, so the requests past the end are still issued and come back empty. Measured against 250 projects: `offset=240` is three requests to return ten rows, and `offset=300` is three requests to return none. Pair a large `offset` with a `limit`, which is one request
+- `include_pagination_info` (boolean, optional): Return `{"projects": [...], "pagination": {...}}` instead of a bare array. Default: `false`. The same envelope and keys as [`list_redmine_issues`](#list_redmine_issues) -- `total`, `limit`, `offset`, `count`, `has_next`, `has_previous`, `next_offset`, `previous_offset`. `total` is read off the same response the rows came from, so it costs no extra request, and it is reported for every read Redmine measures: `@project_count` comes from `@query.result_count`, the same query as the rows, so a filter narrows the count along with the collection. One deployment shape defeats it: with API metadata suppressed (`nometa` or `X-Redmine-Nometa`) the response carries no `total_count`, python-redmine stops after one page and reports that page's length, so a truncated list arrives with a `total` that agrees with it and `has_next` false. A client cannot tell that from a genuinely small instance
+- `filters` (object, optional): Redmine query filters to narrow the list, for the filters this signature does not name -- e.g. `{"cf_42": "Gold"}`. Accepted keys and value types are listed below
+
+**Returns:** List of project dictionaries carrying `id`, `name`, `identifier`, `description`, `homepage`, `parent`, `status`, `is_public`, `inherit_members`, `created_on` and `updated_on` -- what Redmine's project index renders -- plus `custom_fields` when requested. With `include_pagination_info=true`, `{"projects": [...], "pagination": {...}}` instead.
+
+`status` is Redmine's integer code (`1` active, `5` closed). `parent` is `{id, name}` or `null`; Redmine renders it only when the parent exists **and** is visible to the caller, so `null` means top-level **or** a parent this caller cannot see, and the two cannot be told apart. A key the payload did not carry is `null` rather than a substituted default -- for `is_public` and `inherit_members` especially, a `false` would read as a setting Redmine never sent.
 
 **Example:**
 ```json
@@ -220,51 +425,172 @@ Lists all accessible projects in the Redmine instance.
     "id": 1,
     "name": "My Project",
     "identifier": "my-project",
-    "description": "Project description"
+    "description": "Project description",
+    "homepage": "https://example.com",
+    "parent": {"id": 7, "name": "Umbrella"},
+    "status": 1,
+    "is_public": true,
+    "inherit_members": false,
+    "created_on": "2025-01-15T10:30:00",
+    "updated_on": "2025-03-20T09:15:00"
   }
 ]
 ```
+
+**Example with `include_custom_fields=True`:** each entry also carries
+```json
+    "custom_fields": [
+      {"id": 12, "name": "Size", "value": "S"}
+    ]
+```
+
+**Example with `include_pagination_info=True`:**
+```json
+{
+  "projects": [ ... ],
+  "pagination": {
+    "total": 250,
+    "limit": 100,
+    "offset": 0,
+    "count": 100,
+    "has_next": true,
+    "has_previous": false,
+    "next_offset": 100,
+    "previous_offset": null
+  }
+}
+```
+
+With no `limit` there is no page size, so the envelope describes one complete read: `has_next` is `false`, `next_offset` is `null`, and `previous_offset` points back at the start of the collection rather than at the offset the caller is already on.
+
+**Project custom field values:** Redmine renders them on `GET /projects.json`
+unconditionally, so `include_custom_fields=True` adds them with no per-project
+follow-up request. Requires only `view_project`. Each entry is
+`{id, name, value}`, already limited by Redmine to the fields the caller may
+see. This is the only tool that returns project custom field *values*. Project
+custom fields and issue custom fields are separate in Redmine:
+[`list_project_issue_custom_fields`](#list_project_issue_custom_fields) covers
+the latter, and no tool exposes project custom field definitions.
+
+**Narrowing the list (`filters`):** `GET /projects.json` runs the request
+through Redmine's `ProjectQuery`, so a filter can be applied server-side
+instead of fetching every project and filtering locally:
+
+```python
+list_redmine_projects(filters={"cf_42": "Gold"}, include_custom_fields=True)
+```
+
+**Accepted keys.** `filters` takes the filters `ProjectQuery` registers and
+nothing else:
+
+| Key | Notes |
+| --- | --- |
+| `status` | Only the `=` and `!` operators; `*` is not one of them |
+| `id` | |
+| `name` | |
+| `description` | |
+| `parent_id` | |
+| `is_public` | `"1"` or `"0"` |
+| `created_on` | |
+| `updated_on` | Registered on 6.1; absent on some older versions |
+| `cf_<id>` | A project custom field, visible to the caller and flagged **Used as a filter** |
+| `cf_<id>.cf_<id>`, `cf_<id>.due_date`, `cf_<id>.status` | The chained filters Redmine registers for a custom field whose format targets another record |
+
+Any other key is refused with an error naming that set, rather than being
+forwarded. This is an allowlist because the two directions are not symmetric:
+Redmine builds its query from the filter parameters it registers and ignores
+every other one, so refusing an unregistered key costs a caller nothing it
+could have used -- while a parameter that is not a filter at all can still be
+read by another part of the same request instead of being ignored. `fields`,
+`f` and `query_id` are called out separately in the error, since Redmine reads
+the first two as the query's own filter definition and empties the filters
+built from the rest of the request, and `query_id` selects a saved query
+instead. `limit` and `offset` are refused inside `filters` too -- pass them as
+the named parameters, which validate them.
+
+**Accepted values.** Each value must be a single scalar: a string, integer,
+float, `date` or `datetime`. Lists, dicts and `None` are refused, and so is a
+Python `bool` -- it urlencodes as `True`, while a yes/no filter's values are
+`"1"` and `"0"`, so it would be accepted and then match nothing. Write
+`{"is_public": "1"}`. A filter's operator travels inside the value as a prefix
+Redmine strips off, and alternatives are joined with `|`, so a scalar is all a
+filter ever needs:
+
+```python
+list_redmine_projects(filters={"created_on": ">=2024-01-01", "name": "~api"})
+```
+
+Two more things to know before relying on `filters`:
+
+- Redmine ignores an unregistered filter parameter without erroring, answering
+  `200` with the unfiltered collection -- which looks identical to a filter that
+  matched everything. Confirm a narrow filter actually narrowed. A project
+  custom field that is not marked "Used as a filter" is exactly this case, and
+  project custom fields are a different set from issue custom fields, so the id
+  has to come from a project one.
+- The query defaults to `status = 1` (active), so this tool returns **only
+  active projects** unless `filters` says otherwise. Pass `{"status": "1|5"}`
+  to get closed projects alongside active ones.
+
+**Pagination:** omitting `limit` returns every visible project, unchanged from
+before these parameters existed. `limit` is not capped at Redmine's 100-per-request
+ceiling, because python-redmine pages past it internally; `limit=250` issues as
+many requests as it needs.
 
 ---
 
 ### `list_project_issue_custom_fields`
 
-List issue custom fields configured for a project, including allowed values and tracker bindings.
+List the ids and names of the issue custom fields enabled for a project.
+
+**OAuth scopes:** `view_project`, for `projects#show`, and nothing beyond it. Every released Redmine renders the `issue_custom_fields` include gated on `include_in_api_response?` alone, with no permission check, so requiring anything further would refuse calls Redmine itself serves. `view_project` being a `:public => true` permission is not an exemption -- `Role#allowed_permissions` intersects the public permissions with the token's scopes too, so a token carrying no scopes is still refused.
 
 **Parameters:**
 - `project_id` (integer or string, required): Project ID (numeric) or identifier (string)
-- `tracker_id` (integer, optional): Restrict output to fields applicable to the given tracker ID
+- `tracker_id` (integer, optional): Restrict output to fields applicable to the given tracker ID. Requires readable tracker bindings, which stock Redmine does not provide -- see below
 
-**Returns:** List of custom field metadata dictionaries
+**Returns:** List of custom field metadata dictionaries. `[]` means the project enables no issue custom fields.
 
-**Example:**
+When Redmine's response leaves the `issue_custom_fields` array out, the tool returns an `error` with `code: "ISSUE_CUSTOM_FIELDS_UNREADABLE"` and a `hint` rather than `[]`, so "unknown" never looks like "none". Redmine 6.1.4 and 7.0.1 leave the array out for a caller without View issues on the project, so such a caller gets this error; earlier releases send the array whenever it is requested.
+
+**Example (stock Redmine):**
 ```json
 [
   {
     "id": 6,
     "name": "Size",
-    "field_format": "list",
-    "is_required": false,
-    "multiple": false,
-    "default_value": "M",
-    "possible_values": ["S", "M", "L"],
-    "trackers": [{"id": 5, "name": "Bug"}]
+    "field_format": null,
+    "is_required": null,
+    "multiple": null,
+    "default_value": null,
+    "possible_values": null,
+    "trackers": null
   }
 ]
 ```
+
+**⚠️ `null` means "not readable on this token", never a default.** This tool reads `GET /projects/{id}.json?include=issue_custom_fields`, which Redmine renders as exactly `id` and `name` per field (`app/helpers/projects_helper.rb`, the same two keys in 6.1, 7.0 and trunk). The definitions live on `GET /custom_fields.json`, which Redmine restricts to administrators (`before_action :require_admin`), so a non-admin token cannot read them at all. Under OAuth even an administrator's token cannot: `User#admin?` additionally requires the `admin` scope, which this server never requests. Redmine has four open requests to expose this metadata to non-admins ([#18875](https://www.redmine.org/issues/18875), [#41318](https://www.redmine.org/issues/41318), [#42581](https://www.redmine.org/issues/42581), [#43407](https://www.redmine.org/issues/43407)), none with a target version.
+
+Read `null` as "unknown". It is not `false`, and it is not an empty list. `is_required: null` in particular does not mean the field is optional.
+
+The keys are kept rather than dropped so the response shape is stable across deployments, and so they start carrying data for free if a future Redmine populates the include.
 
 **Example with tracker filter:**
 ```python
 list_project_issue_custom_fields(project_id="pipeline", tracker_id=5)
 ```
 
-**⚠️ `is_required` caveat (#119):** the underlying `GET /custom_fields.json` only exposes the flag set on the custom field *definition*. Workflow rules, role-based field permissions, and tracker-bound required-field settings can still cause `create_redmine_issue` / `update_redmine_issue` to reject with `"<field> cannot be blank"` for a field that this tool returns with `is_required: false`. No general-purpose Redmine API exposes the "effective" required state.
+Against a stock Redmine this returns an `error` with `code: "TRACKER_BINDINGS_UNREADABLE"` and a `hint`, because tracker bindings are part of the admin-only definition and the filter cannot be applied. It previously returned every field in the project, which a caller had no way to distinguish from a filtered list. Omit `tracker_id` to list every field enabled for the project.
+
+The `error` describes what this particular response carried rather than asserting what Redmine always does, since bindings *are* readable on a payload that includes them; the standing Redmine explanation is in the `hint`.
+
+**⚠️ `is_required` caveat (#119):** even where the flag *is* readable it only reflects the custom field *definition*. Workflow rules, role-based field permissions, and tracker-bound required-field settings can still cause `create_redmine_issue` / `update_redmine_issue` to reject with `"<field> cannot be blank"` for a field that this tool returns with `is_required: false`. No general-purpose Redmine API exposes the "effective" required state.
 
 When a create or update rejects with that error, the response envelope is augmented with `missing_required_fields` (parsed names) and a `hint` that lists the three recovery paths:
 
 1. **Name-keyed shortcut** — pass the rejected field by name directly: `fields={"Department": "Engineering"}` on either `create_redmine_issue` or `update_redmine_issue`. The tool resolves the name to a `custom_fields` id automatically. Ambiguous names (two fields normalized identically) raise.
 2. **Explicit id form** — `extra_fields={"custom_fields": [{"id": N, "value": "..."}]}` with `N` from this tool. Use when the name is ambiguous or the value type is awkward (multi-value, complex serializations).
-3. **Autofill** — set `REDMINE_AUTOFILL_REQUIRED_CUSTOM_FIELDS=true` to have the server retry once with values from each field's `default_value` or the `REDMINE_REQUIRED_CUSTOM_FIELD_DEFAULTS` env map.
+3. **Autofill** -- set `REDMINE_AUTOFILL_REQUIRED_CUSTOM_FIELDS=true` to have the server retry once with values from each field's `default_value` or the `REDMINE_REQUIRED_CUSTOM_FIELD_DEFAULTS` env map. Against a stock Redmine only the env map can supply a value: `default_value` is not in the include the server reads.
 
 ---
 
@@ -389,6 +715,110 @@ manage_redmine_version(
 
 ---
 
+### `manage_redmine_project`
+
+Create a Redmine project, edit its settings, or close and reopen it. This tool
+writes the project record itself; its contents have their own tools
+(`manage_redmine_version`, `manage_project_member`, `manage_issue_category`).
+
+Archiving is not offered: Redmine gates `archive` and `unarchive` on
+administrator rights rather than on a project permission, and this server never
+advertises the `admin` scope. Deleting is not offered either — it destroys every
+issue, wiki page and file in the project and in each of its subprojects.
+
+**Parameters:**
+- `action` (string, required): Operation to perform. Allowed values: `create`, `update`, `close`, `reopen`
+- `project_id` (integer or string): Project ID or identifier. Required for `action="update"`, `action="close"` and `action="reopen"`
+- `name` (string): Project name. Required for `action="create"`
+- `identifier` (string): URL identifier, e.g. `lunar-programme`. Required for `action="create"`; rejected for `action="update"`, because Redmine freezes the identifier once the project exists
+- `description` (string, optional): Project description
+- `homepage` (string, optional): Project homepage URL
+- `is_public` (boolean, optional): Whether the project is visible to non-members. Needs the `select_project_publicity` permission; without it Redmine ignores the field rather than refusing the call
+- `parent_id` (integer, optional): Parent project ID. Creating a subproject needs `add_subprojects` on the parent
+- `inherit_members` (boolean, optional): Whether the project inherits the parent's members
+- `enabled_module_names` (array of strings, optional): Modules to enable, e.g. `["issue_tracking", "wiki"]`. Replaces the current set. Needs the `select_project_modules` permission; without it Redmine ignores the field rather than refusing the call
+- `tracker_ids` (array of integers, optional): Tracker IDs to enable. Replaces the current set
+- `issue_custom_field_ids` (array of integers, optional): Issue custom field IDs to enable. Replaces the current set
+- `default_assigned_to_id` (integer, optional): Default assignee user ID
+- `default_version_id` (integer, optional): Default version ID
+- `default_issue_query_id` (integer, optional): Default issue query ID. Redmine accepts it but does not render it back, so it is absent from the response
+- `custom_fields` (array of objects, optional): Custom field values, as Redmine's own `{"id": ..., "value": ...}` entries
+
+**Returns:** the full project dictionary, read back from Redmine after the
+write — `PUT /projects/{id}.json` answers `204 No Content`, and reading back is
+also what shows the caller whether a permission-gated field took effect.
+
+The read-back asks for `include=enabled_modules,trackers,issue_custom_fields`,
+so every collection the tool can write comes back in the response. That is what
+makes a silently dropped `enabled_module_names` visible: Redmine discards it
+for a caller without `select_project_modules` and still answers `204`, and
+`enabled_modules` in the response is the only way to tell. All three includes
+are gated on `include_in_api_response?` alone, so they need no extra scope.
+
+Modules come back as names, matching the `enabled_module_names` parameter that
+writes them; trackers and issue custom fields come back as `{id, name}`,
+because `tracker_ids` and `issue_custom_field_ids` write them by id.
+
+On `create` the read-back is best-effort. The project exists by then, so a
+failure to read it is never reported as an error — that would invite a retry
+and a duplicate project. Redmine adds the creator as a member only when a
+default role is configured, so a non-admin creator on an instance without one
+can create a project and then be refused `projects#show`. In that case the
+response is the creation body, which carries every field except the three
+include arrays, and the server logs a warning.
+
+```json
+{
+  "id": 42,
+  "name": "Lunar Programme",
+  "identifier": "lunar-programme",
+  "description": "<insecure-content-...>...</insecure-content-...>",
+  "homepage": "https://example.com/apollo",
+  "parent": {"id": 7, "name": "Space"},
+  "status": 1,
+  "is_public": false,
+  "inherit_members": true,
+  "default_version": {"id": 5, "name": "v1.0"},
+  "default_assignee": {"id": 4, "name": "Jo Doe"},
+  "custom_fields": [{"id": 11, "name": "Cost centre", "value": "CC-900"}],
+  "enabled_modules": ["issue_tracking", "wiki"],
+  "trackers": [{"id": 1, "name": "Bug"}, {"id": 2, "name": "Feature"}],
+  "issue_custom_fields": [{"id": 11, "name": "Cost centre"}],
+  "created_on": "2026-01-01T10:00:00",
+  "updated_on": "2026-04-01T14:30:00"
+}
+```
+
+Error: `{"error": "..."}`
+
+**Examples:**
+
+```python
+# Create a subproject with two modules enabled
+manage_redmine_project(
+    action="create",
+    name="Lunar Programme",
+    identifier="lunar-programme",
+    parent_id=7,
+    description="Apollo follow-on",
+    enabled_module_names=["issue_tracking", "wiki"],
+)
+
+# Rename a project and point it at a new homepage
+manage_redmine_project(
+    action="update",
+    project_id="lunar-programme",
+    name="Lunar Programme (2026)",
+    homepage="https://example.com/apollo",
+)
+
+# Close a finished project, and reopen it later
+manage_redmine_project(action="close", project_id="lunar-programme")
+manage_redmine_project(action="reopen", project_id="lunar-programme")
+```
+
+---
+
 ### `list_project_members`
 
 List all members (users and groups) of a Redmine project along with their assigned roles.
@@ -396,7 +826,7 @@ List all members (users and groups) of a Redmine project along with their assign
 **Parameters:**
 - `project_id` (integer or string, required): Project ID (numeric) or identifier (string)
 
-**Returns:** List of membership dictionaries containing user/group info and roles
+**Returns:** List of membership dictionaries containing user/group info and roles. A role that comes from a group the user belongs to, or from the parent project when this one inherits members, carries `inherited: true`; Redmine omits the key for a role held directly, and so does this tool. A role held both ways appears twice on the same row, once with the key and once without, so do not deduplicate roles by `id`.
 
 **Example:**
 ```json
@@ -406,7 +836,10 @@ List all members (users and groups) of a Redmine project along with their assign
     "user": {"id": 5, "name": "John Doe"},
     "group": null,
     "project": {"id": 10, "name": "My Project"},
-    "roles": [{"id": 3, "name": "Developer"}]
+    "roles": [
+      {"id": 3, "name": "Developer"},
+      {"id": 4, "name": "Manager", "inherited": true}
+    ]
   },
   {
     "id": 2,
@@ -490,7 +923,7 @@ Add, update, or remove a Redmine project membership.
 - `role_ids` (array of integers): Non-empty list of role IDs. Required for `action="add"` and `action="update"`. Use `list_redmine_roles` to discover valid IDs
 
 **Returns:**
-- `add`/`update`: membership dictionary (with `id`, `user`/`group`, `project`, `roles`)
+- `add`/`update`: membership dictionary (with `id`, `user`/`group`, `project`, `roles`), shaped like a `list_project_members` entry. `update` returns the whole membership as Redmine re-reads it, so an inherited role on it carries `inherited: true`
 - `remove`: `{"success": true, "deleted_membership_id": <id>}`
 - Error: `{"error": "..."}`
 
@@ -529,13 +962,26 @@ Retrieve detailed information about a specific Redmine issue.
 - `include_attachments` (boolean, optional): Include attachments metadata. Default: `true`
 - `include_custom_fields` (boolean, optional): Include custom fields in result. Default: `true`
 - `journal_limit` (integer, optional): Maximum number of journals to return. When set, enables journal pagination and adds `journal_pagination` metadata. Default: `null` (all journals)
-- `journal_offset` (integer, optional): Number of journals to skip (used with `journal_limit`). Default: `0`
+- `journal_offset` (integer, optional): Number of journals to skip, counted from whichever end `journal_order` selects (used with `journal_limit`). Default: `0`
+- `journal_order` (string, optional): `"asc"` (default, oldest first) or `"desc"` (newest first). **`"desc"` is what answers "the last few comments"** — with `"asc"`, a `journal_limit` returns the *oldest* ones and reaching the newest needs `journal_offset = total - journal_limit`, which means fetching everything first to learn `total`. Journals are sorted by id before either order is applied, so the result does not depend on the "display comments in reverse chronological order" setting of the account behind the API key. Echoed back as `order` in `journal_pagination`.
 - `include_watchers` (boolean, optional): Include watcher list. Default: `false`
-- `include_relations` (boolean, optional): Include issue relations. Default: `false`
+- `include_relations` (boolean, optional): Include issue relations. Default: `false`. Requires only `view_issues`. Each entry is `{id, issue_id, issue_to_id, relation_type, delay}`.
 - `include_children` (boolean, optional): Include child issues. Default: `false`
+- `include_journal_values` (boolean, optional): Return the before/after text of field changes in full instead of by length. Default: `false` — see **Journal field changes** below.
+- `fields` (list, optional): Narrow the issue's own keys, with the same meaning `list_redmine_issues` gives it — `null`, `["*"]` and `["all"]` return everything, an unknown name is skipped rather than refused, and naming `custom_fields` or `relations` implies the matching flag. **It does not reach journals, attachments or custom fields**: those `include_*` switches stay independent and all three default to `true`, so `fields=["id", "status"]` alone still returns them. A cheap read is `fields` together with `include_journals=false`, `include_attachments=false` and `include_custom_fields=false`. `description_sha256` comes back either way, so a caller can patch a description it chose not to read.
 
 
-**Returns:** Issue dictionary with details, journals, and attachments. Standard fields include `category`, `fixed_version` (target version), and `parent` (each `{id, ...}` or `None`), plus `start_date`, `due_date`, `closed_on` (ISO-8601 or `None`), `done_ratio`, `estimated_hours`, `spent_hours`, and `is_private`. Each is `None` when not set on the issue. When `REDMINE_AGILE_ENABLED=true`, also includes `story_points`, `agile_sprint_id`, and `agile_position` from the RedmineUP Agile plugin.
+**Returns:** Issue dictionary with details, journals, and attachments, plus `description_sha256` — the digest of the raw description, for `update_redmine_issue`'s `description_expected_sha256`. Standard fields include `category`, `fixed_version` (target version), and `parent` (each `{id, ...}` or `None`), plus `start_date`, `due_date`, `closed_on` (ISO-8601 or `None`), `done_ratio`, `estimated_hours`, `spent_hours`, `total_estimated_hours`, `total_spent_hours` (the last two include subtasks), and `is_private`. Each is `None` when not set on the issue. When `REDMINE_AGILE_ENABLED=true`, also includes `story_points`, `agile_sprint_id`, and `agile_position` from the RedmineUP Agile plugin. Top-level keys the standard Redmine API does not define (added by a distribution or plugin, e.g. Easy Redmine's `easy_sprint` and `easy_story_points`) are passed through under `unmapped_fields`; the key is omitted when there are none. Null values are dropped, every string inside is wrapped in the same `<insecure-content-...>` boundary tags as `description` (nested ones included), and a value longer than 1000 characters once wrapped and serialized is skipped -- the cap is measured after wrapping because that is the size that reaches the client. The cap is a size rule, not a name list, so plugin rendering data such as Easy Redmine's `css_classes` still comes through when it is short enough.
+
+**Journal field changes (#313):** a journal's `details` entries describe field changes as `{property, name, old_value, new_value}`. Redmine records a description edit with the **full old and new text**, so a ticket whose description is edited repeatedly carries several copies of it in its change log — on one real ticket that was 827 KB of an 879 KB response, against 4.7 KB of actual comment text. Values longer than `REDMINE_MCP_JOURNAL_VALUE_MAX_CHARS` (default 500) are therefore reported by length:
+
+```json
+{"property": "attr", "name": "description",
+ "old_value": null, "new_value": null,
+ "old_value_length": 26917, "new_value_length": 51857, "elided": true}
+```
+
+The value keys stay present and hold `null`, so a caller reading them gets no `KeyError` and can tell an elided value from an empty one by the `elided` flag. Each value is judged on its own, so a short `old_value` survives beside a long `new_value`. The current values are on the issue itself, not in the details — pass `include_journal_values=true` only when the *previous* text is what is being asked for, or set the environment variable to `0` to switch eliding off entirely.
 
 **Attachment URLs (#110, #118):** each entry under `attachments` carries the canonical shape `{id, filename, filesize, content_type, description, content_url, author, created_on}` — identical to what `manage_redmine_wiki_page(action="get", include_attachments=True)` returns. When `REDMINE_PUBLIC_URL` is set, any `content_url` whose scheme+host+port matches `REDMINE_URL`'s origin is rewritten to use the public origin (preserving path, query, fragment, and any reverse-proxy subpath). When unset, the raw URL Redmine echoes back is returned — callers can fall back to [`get_redmine_attachment`](#get_redmine_attachment) for a sandbox-safe download URL via the MCP server's proxy.
 
@@ -638,14 +1084,35 @@ List Redmine issues with flexible filtering and pagination support. A general-pu
 - `priority_id` (integer, optional): Filter by priority ID
 - `fixed_version_id` (integer, optional): Filter by target version/milestone ID
 - `sort` (string, optional): Sort order (e.g., `"updated_on:desc"`)
-- `limit` (integer, optional): Maximum issues to return. Default: `25`, Max: `1000`
+- `limit` (integer, optional): Maximum issues to return. Default: `25`, Max: `1000`. Above 100 the request is paged in chunks of 100 and costs one request per chunk *asked for*, not per chunk returned -- a ten-issue project read at `limit=1000` costs ten requests to return ten rows, nine of them fetching nothing. The default of 25 is one request. Ask for a number you want, not a large one meaning "all"
 - `offset` (integer, optional): Number of issues to skip for pagination. Default: `0`
-- `include_pagination_info` (boolean, optional): Return structured response with metadata. Default: `false`
+- `include_pagination_info` (boolean, optional): Return structured response with metadata. Default: `false`. `total` is Redmine's `total_count`, read off the same response the issues came from, so it costs no extra request, and `has_next` is measured from it (`offset + limit < total`) rather than inferred from a full page. When the response carries no usable total (API metadata suppressed via `nometa` or `X-Redmine-Nometa`), `total` is `null`, never an estimate, and `has_next` falls back to the full-page inference
+- `include_custom_fields` (boolean, optional): Add `custom_fields` to each issue. Default: `false` — unlike `get_redmine_issue`, which defaults to `true`, because a list page multiplies the payload
+- `include_relations` (boolean, optional): Add `relations` to each issue. Default: `false`. Each entry is `{id, issue_id, issue_to_id, relation_type, delay}`
+- `filters` (object, optional): Redmine query filters, for what the signature above does not name and for forms the named parameters cannot express. Merged *after* them, so a key here overrides the parameter of the same name -- which is the point: Redmine carries a filter's operator inside its value, and the typed parameters cannot. An operator is a prefix and alternatives join with `|`, so `{"tracker_id": "56|57"}` is either tracker, `{"assigned_to_id": "!*"}` is unassigned, `"*"` is assigned to anyone, `{"priority_id": "!4"}` is "not 4". The operator sets a filter's type accepts are Redmine's own (`app/models/issue_query.rb`): `tracker_id` and `priority_id` are `:list_with_history`, `assigned_to_id` is `:list_optional_with_history`, which is what adds `*` and `!*`. An operator the type does not accept is read as a literal value rather than erroring, and a filter Redmine cannot read at all answers 200 with the collection unnarrowed -- so check a narrowed read against what was asked for. A `cf_<id>` must be an *issue* custom field, visible to the caller, with "Used as a filter" on; without that flag it is discarded silently and the response is a plausible superset. That flag is hand-toggled by an administrator and can be cleared again, so a filter that worked yesterday can widen silently today. **Accepted keys:** the filters `IssueQuery` registers (`status_id`, `tracker_id`, `priority_id`, `project_id`, `subproject_id`, `category_id`, `fixed_version_id`, `assigned_to_id`, `author_id`, `watcher_id`, `parent_id`, `child_id`, `issue_id`, `subject`, `description`, `notes`, `any_searchable`, `start_date`, `due_date`, `created_on`, `updated_on`, `closed_on`, `done_ratio`, `estimated_hours`, `spent_time`, `is_private`, `attachment`, `attachment_description`, `updated_by`, `last_updated_by`, `member_of_group`, `assigned_to_role`, `author.group`, `author.role`, `project.status`, `fixed_version.status`, `fixed_version.due_date`, and the relation names `relates`, `duplicates`, `duplicated`, `blocks`, `blocked`, `precedes`, `follows`, `copied_to`, `copied_from`), plus `cf_<id>` with its chained spellings (`cf_<id>.cf_<id>`, `cf_<id>.due_date`, `cf_<id>.status`) and the association spellings `project.cf_<id>`, `author.cf_<id>`, `assigned_to.cf_<id>` and `fixed_version.cf_<id>`. `query_id` (a saved query's id from `list_redmine_queries`), `include` and `sort` are accepted as request parameters; `limit` and `offset` are moved onto the named parameters and bounded there. Any other key is refused with an error naming that set, because a key Redmine would not read as a filter can still be read by another layer of the request (`key` is taken as the API key ahead of the header, and `uploads` is decoded by python-redmine as files to read and upload before the list request). **Accepted values:** each value is a single scalar (string, integer, float, `date` or `datetime`); lists, dicts, `None` and `bool` are refused. Write a yes/no filter as `"1"` or `"0"`. `include` may still be a list
 - `fields` (array of strings, optional): List of field names to include in results. Default: all fields
-  - Available fields: `id`, `subject`, `description`, `project`, `status`, `priority`, `tracker`, `author`, `assigned_to`, `created_on`, `updated_on` — `tracker` is returned by default
-  - Special values: `["*"]` or `["all"]` for all fields
+  - Available fields: `id`, `subject`, `description`, `project`, `status`, `priority`, `tracker`, `author`, `assigned_to`, `category`, `fixed_version`, `parent`, `start_date`, `due_date`, `done_ratio`, `estimated_hours`, `spent_hours`, `total_estimated_hours`, `total_spent_hours`, `is_private`, `closed_on`, `created_on`, `updated_on`, `custom_fields`, `relations`, `unmapped_fields` — `tracker` is returned by default. `unmapped_fields` holds the top-level keys the standard Redmine API does not define (distribution or plugin additions such as Easy Redmine's `easy_sprint`), and is skipped when there are none
+  - Special values: `["*"]` or `["all"]`, on their own, select every field except `custom_fields` and `relations`. Those two need their flag — naming one alongside `["*"]` narrows the result to just it, rather than adding it to the full set
+  - Naming `custom_fields` or `relations` in a normal field list does the same as the matching flag. For `relations` that includes adding the include to the request, so the key cannot come back empty just because the flag was not also set. Setting a flag also adds its key to a narrowed `fields` list rather than dropping it.
 
 **Returns:** List of issue dictionaries, or structured response with pagination metadata
+
+**Notes on `custom_fields` and `relations`:**
+- Both come from data Redmine already returns on the list endpoint, so a whole page costs one request either way. Custom field values are rendered unconditionally; relations are read from the `include=relations` payload, so `view_issues` is sufficient and no per-issue call is made.
+- An `include` passed through `filters` is kept and merged. Passing `include=relations` that way alone does not add the key — use the flag or name the field.
+- They are opt-in only to keep the default response small. The default output is unchanged.
+- Custom field values are filtered per caller by Redmine (`Issue#visible_custom_field_values`). **Relations on the list endpoint are not:** Redmine applies the target-issue visibility filter on `GET /issues/{id}` but not on `GET /issues.json`, so `issue_to_id` may name an issue the caller cannot read. Resolve a target through `get_redmine_issue`, which does apply the filter, rather than inferring anything from the id alone.
+- `search_redmine_issues` shares this serializer and can select `custom_fields` the same way, but not `relations` — it never requests the include, so the key could only ever be empty there.
+
+```python
+# One request, not one per issue.
+list_redmine_issues(
+    project_id="my-project",
+    fields=["id", "subject", "custom_fields", "relations"],
+    include_relations=True,
+    limit=100,
+)
+```
 
 **Examples:**
 
@@ -706,9 +1173,9 @@ Search issues using text queries with support for pagination, field selection, a
 - `query` (string, required): Text to search for in issues
 - `limit` (integer, optional): Maximum number of issues to return. Default: `25`, Max: `1000`
 - `offset` (integer, optional): Number of issues to skip for pagination. Default: `0`
-- `include_pagination_info` (boolean, optional): Return structured response with pagination metadata. Default: `false`
+- `include_pagination_info` (boolean, optional): Return structured response with pagination metadata. Default: `false`. The Search API reports no `total_count`, so `total` is always `null` ("not reported") and `has_next` uses the full-page inference: `true` whenever the page came back full, which is only ever optimistic and costs one wasted request at worst
 - `fields` (array of strings, optional): List of field names to include in results. Default: `null` (all fields)
-  - Available fields: `id`, `subject`, `description`, `project`, `status`, `priority`, `tracker`, `author`, `assigned_to`, `created_on`, `updated_on` — `tracker` is returned by default
+  - Available fields: `id`, `subject`, `description`, `project`, `status`, `priority`, `tracker`, `author`, `assigned_to`, `created_on`, `updated_on`, `custom_fields` — `tracker` is returned by default. Naming `custom_fields` hydrates the results through the issues endpoint, which renders the values; there is no `relations` here, since this tool never requests that include
   - Special values: `["*"]` or `["all"]` for all fields
 - `scope` (string, optional): Search scope. Default: `"all"`
   - Values: `"all"`, `"my_project"`, `"subprojects"`
@@ -753,6 +1220,7 @@ search_redmine_issues(
 # {
 #   "issues": [...],
 #   "pagination": {
+#     "total": null,
 #     "limit": 25,
 #     "offset": 0,
 #     "count": 25,
@@ -808,7 +1276,8 @@ Creates a new issue in the specified project. Blocked when `REDMINE_MCP_READ_ONL
 **Parameters:**
 - `project_id` (integer, required): Target project ID
 - `subject` (string, required): Issue subject/title
-- `description` (string, optional): Issue description. Default: `""`
+- `description` (string, optional): Issue description. Default: `""`. Mutually exclusive with `description_upload_id`.
+- `description_upload_id` (string, optional): Take the whole description from a file staged with [`create_upload_ticket`](#create_upload_ticket), decoded as UTF-8. **The way to open an issue with a long description.**
 - `fields` (object|string, optional): Additional Redmine fields as:
   - an object (`{"priority_id": 3, "tracker_id": 1}`), or
   - a serialized JSON object string (for MCP clients that pass string payloads)
@@ -819,16 +1288,32 @@ Creates a new issue in the specified project. Blocked when `REDMINE_MCP_READ_ONL
   - Exactly ONE source key:
     - `content_base64` (string): Raw file bytes encoded as base64. `filename` is required when using this source.
     - `source_url` (string): HTTP(S) URL the server fetches. Filename is derived from the URL or `Content-Disposition` if omitted.
-    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted.
+    - `upload_id` (string): A file staged with `create_upload_ticket`. **The way to send a file that lives on the caller's own machine** — the caller POSTs the bytes to the ticket's `upload_url` in one request, so they go from disk to the server directly and are never written into a tool argument. Filename defaults to the one the ticket was created with.
+    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem. Where the server runs on the caller's machine that includes the caller's own files, and this source costs no tokens; over HTTP the two are different hosts, and no value of `REDMINE_MCP_UPLOAD_FILE_ROOTS` can bridge the gap — such a file travels as `content_base64` or `source_url`, neither of which needs roots configured.
   - `filename` (string, optional): Name the attachment will have in Redmine. Required for `content_base64`; derived for other sources when omitted.
+  - `sha256` (string, optional) / `size_bytes` (integer, optional): what the caller meant to send. Checked after the content is resolved and before anything reaches Redmine; a mismatch refuses the whole call. Worth passing with `content_base64`, whose payload is written out by the model and can arrive mangled.
   - `content_type` (string, optional): MIME type override (e.g. `"application/pdf"`).
   - `description` (string, optional): Human-readable description for the attachment.
+
+**A long description (#326):** at creation the whole text is new by definition, so there is nothing to patch and no prior version to guard — `description_upload_id` is the only alternative to writing it out into the tool argument, and it takes no checksum. Write the text to a file, send it with the ticket route, and name the `upload_id` here. A description written into `description` is produced a token at a time with nothing to check it against, which is the same failure `content_base64` has for attachments; it stays right for a short one.
+
+```python
+# ticket = create_upload_ticket(filename="description.html")
+# curl -sS -H "X-Upload-Ticket: $TICKET" --data-binary @description.html "$UPLOAD_URL"
+create_redmine_issue(
+    project_id=1,
+    subject="Cleanup-Review",
+    description_upload_id="6f1e...",
+)
+```
 
 **Returns:** Created issue dictionary. When `uploads` is provided and at least one attachment succeeds, the response includes:
 - `attachments` (list): Metadata for each attached file (id, filename, filesize, content_url, etc.).
 - `journal_id` (integer or null): ID of the journal entry the attachments were placed on, or null when no journal note accompanies the upload (i.e. when no `notes` is provided).
 
-**Name-keyed custom fields (#123):** `fields` accepts custom-field *names* directly. The tool resolves the name to a `custom_fields` entry via `list_project_issue_custom_fields` and rewrites the payload before sending it to Redmine. Ambiguous names (two custom fields that normalize to the same name) raise with an explicit error pointing at the id form.
+**Name-keyed custom fields (#123):** `fields` accepts custom-field *names* directly. The tool resolves the name to a `custom_fields` entry via `list_project_issue_custom_fields` and rewrites the payload before sending it to Redmine. Ambiguous names (two custom fields that normalize to the same name) raise with an explicit error pointing at the id form. A key that was meant as a name but matches no custom field is refused with the closest match and the project's field names, and nothing is written: that is any key with spaces or capitals, and any snake_case key within a typo of a field name. Other snake_case keys are passed through untouched, so plugin attributes such as `agile_data_attributes` still reach Redmine. Redmine ignores a key it does not know without an error, so the response lists every passed-through key in `unverified_fields` (#380): the server sent it but cannot tell whether Redmine applied it. `project_id`, `lock_version`, `custom_field_values` and keys registered by an [extension](extensions.md) are not listed, and the key is omitted when there is nothing to report.
+
+Resolving a name reads `GET /projects/{id}.json?include=issue_custom_fields`, which needs the View project permission (OAuth scope `view_project`); `update_redmine_issue` first reads the issue to find its project, which needs View issues (`view_issues`). Neither is in the tools' scope entries, because only a name-keyed payload makes the read. If the read is denied, or Redmine's response leaves `issue_custom_fields` out (Redmine 6.1.4 and 7.0.1 leave it out for a caller without View issues on the project; earlier releases always send it), the tool returns an `error` and writes nothing, rather than sending the name on as a key Redmine ignores. The id form below needs no lookup.
 
 ```python
 # Name-keyed -- the tool resolves "Department" to its custom_field id
@@ -862,7 +1347,7 @@ create_redmine_issue(
 )
 ```
 
-**Autofill retry:** if `REDMINE_AUTOFILL_REQUIRED_CUSTOM_FIELDS=true` is set and Redmine returns relevant custom-field validation errors, the server fetches project custom fields, auto-fills missing/invalid required custom fields from Redmine `default_value` or `REDMINE_REQUIRED_CUSTOM_FIELD_DEFAULTS`, and retries once.
+**Autofill retry:** if `REDMINE_AUTOFILL_REQUIRED_CUSTOM_FIELDS=true` is set and Redmine returns relevant custom-field validation errors, the server fetches project custom fields, auto-fills missing/invalid required custom fields from Redmine `default_value` or `REDMINE_REQUIRED_CUSTOM_FIELD_DEFAULTS`, and retries once. The `default_value` half is inert against a stock Redmine, which does not send it on the include the server reads.
 
 **Examples:**
 ```python
@@ -914,17 +1399,50 @@ Updates an existing issue with the provided fields. Blocked when `REDMINE_MCP_RE
   - Exactly ONE source key:
     - `content_base64` (string): Raw file bytes encoded as base64. `filename` is required when using this source.
     - `source_url` (string): HTTP(S) URL the server fetches. Filename is derived from the URL or `Content-Disposition` if omitted.
-    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted.
+    - `upload_id` (string): A file staged with `create_upload_ticket`. **The way to send a file that lives on the caller's own machine** — the caller POSTs the bytes to the ticket's `upload_url` in one request, so they go from disk to the server directly and are never written into a tool argument. Filename defaults to the one the ticket was created with.
+    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem. Where the server runs on the caller's machine that includes the caller's own files, and this source costs no tokens; over HTTP the two are different hosts, and no value of `REDMINE_MCP_UPLOAD_FILE_ROOTS` can bridge the gap — such a file travels as `content_base64` or `source_url`, neither of which needs roots configured.
   - `filename` (string, optional): Name the attachment will have in Redmine. Required for `content_base64`; derived for other sources when omitted.
+  - `sha256` (string, optional) / `size_bytes` (integer, optional): what the caller meant to send. Checked after the content is resolved and before anything reaches Redmine; a mismatch refuses the whole call. Worth passing with `content_base64`, whose payload is written out by the model and can arrive mangled.
   - `content_type` (string, optional): MIME type override (e.g. `"application/pdf"`).
   - `description` (string, optional): Human-readable description for the attachment.
+
+
+**Patching a long description (#314):** Redmine has no patch endpoint, so passing `description` means sending the finished text — every character of it written into the tool argument. For a long field that is slow (the text is generated one token at a time) and unreliable (a long transcription drops text). Send the change instead:
+
+```python
+update_redmine_issue(
+    issue_id=123,
+    fields={},
+    description_edits=[{"find": "runs on two nodes", "replace": "runs on four nodes"}],
+    description_expected_sha256="<digest of the description as it was read>",
+)
+```
+
+- `description_edits` (list, optional): `{find, replace}` pairs, applied in order on the server. Each `find` must occur **exactly once** in the text as it stands after the preceding edits; zero matches or several refuse the whole call and change nothing, so include enough surrounding text to be unambiguous. Mutually exclusive with a `description` in `fields`.
+- `description_expected_sha256` (string, optional): the digest the description had when it was read. **Echo back the `description_sha256` that `get_redmine_issue` returns** — do not hash the `description` you read, because it is wrapped in `<insecure-content-...>` tags whose id changes on every call, so your digest would never match. Checked before any edit is applied; a mismatch refuses the call instead of overwriting whatever changed in between, and names the current digest so the retry can carry it. Worth passing whenever the read and the write are not in the same breath.
+
+`find` and `replace` are matched with line endings normalized, since Redmine's web UI saves CRLF and a multi-line `find` written with plain newlines would otherwise never match text it is looking straight at. The stored convention is restored on write, so patching does not rewrite every line ending in the field.
+
+A failed edit is reported with the index of the pair that failed and leaves the issue untouched — a half-applied patch is worse than none.
+
+**Replacing a long description wholesale:** where the text really is all new rather than edited, `description_upload_id` takes it from a file staged with [`create_upload_ticket`](#create_upload_ticket), decoded as UTF-8. The content then travels from disk to the server instead of through the conversation, the same way an attachment does. This composes with how an oversized read already comes back — the client writes it to a file the caller can edit in place, and this is the way back.
+
+`description`, `description_edits` and `description_upload_id` are mutually exclusive; passing more than one is refused, naming which were given.
 
 **Returns:** Updated issue dictionary. When `uploads` is provided and at least one attachment succeeds, the response includes:
 - `attachments` (list): Metadata for each attached file (id, filename, filesize, content_url, etc.).
 - `journal_id` (integer): ID of the journal entry the attachments were placed on.
 
-**Note:** You can use either `status_id` or `status_name` in fields. When `status_name` is provided, the tool automatically resolves the corresponding status ID.
-You can also update custom fields by name (for example `{"size": "S"}`) and the tool will resolve them to Redmine `custom_fields` entries using project custom-field metadata. You can still pass explicit `custom_fields` with field IDs.
+`unapplied_fields` (list of strings): the submitted fields the updated issue does not reflect. Redmine discards some writes without an error and saves the rest — a status the workflow does not allow (`Issue#safe_attributes=` deletes `status_id` unconditionally and assigns it only when allowed), a tracker or project outside the allowed targets, a field the workflow makes read-only or the tracker disables, a date, priority or done ratio derived from subtasks, and a custom field the user may not edit. The call still succeeds, and anything else in it, such as a note, was written. Like `unmapped_fields`, the key is omitted when there is nothing to report.
+- Checked: the `*_id` fields (as integers; a project identifier, `"me"` or `"#12"` is not checked), `start_date` and `due_date` (as `YYYY-MM-DD`), `done_ratio`, `estimated_hours` given as a number, `is_private`, `subject`, `description` (ignoring line endings) and custom field values, compared as Redmine stores them.
+- Custom fields are reported as `cf_<id>`, including ones set by name. A status set through `status_name` is reported as `status_name`.
+- Not checked: `notes`, `private_notes`, `uploads`, `watcher_user_ids`, `deleted_attachment_ids`, `tag_list`, agile fields, extension keys, and a file custom field's upload token. The key's absence makes no claim about them.
+- No extra request: the comparison uses the issue the tool already re-fetches for its response.
+
+`unverified_fields` (list of strings): the `fields` keys sent to Redmine as top-level attributes that the server cannot check, as on `create_redmine_issue` (#380). A snake_case key that is not a standard issue key or a custom field name, such as a plugin attribute, is passed through, and Redmine ignores one it does not know without an error. The call still succeeds; this names what was sent on trust. Omitted when empty.
+
+**Note:** You can use either `status_id` or `status_name` in fields. When `status_name` is provided, the tool automatically resolves the corresponding status ID. A `status_name` that matches no status is refused before anything is written, naming the statuses that exist.
+You can also update custom fields by name (for example `{"size": "S"}`) and the tool will resolve them to Redmine `custom_fields` entries using project custom-field metadata. A name that matches no field is refused rather than dropped (see `create_redmine_issue`). You can still pass explicit `custom_fields` with field IDs.
 
 When `REDMINE_AGILE_ENABLED=true`, you can also set RedmineUP Agile fields, written via the Agile plugin endpoint:
 
@@ -1055,6 +1573,15 @@ For other lifecycle operations, use [`create_redmine_issue`](#create_redmine_iss
 }
 ```
 
+`time_entries_count` is `null` when the count could not be read. Redmine has
+no `time_entries` include for an issue, so it is the one count that needs its
+own request, and that request needs `view_time_entries` — which permission to
+read the issue does not imply. A caller lacking it sees `null` rather than
+`0`, because `0` would understate an irreversible cascade. Any other failure
+reading it returns a normal error envelope instead. The other four counts come
+from the issue payload and cost no extra request, including `children`, which
+is absent from the payload for a leaf issue and counts as zero.
+
 **Success envelope:**
 ```json
 {
@@ -1071,6 +1598,9 @@ For other lifecycle operations, use [`create_redmine_issue`](#create_redmine_iss
     }
 }
 ```
+
+`cascade_deleted` carries the same shape as `impact` above, so
+`time_entries_count` can be `null` there too.
 
 **Error codes:** `CONFIRMATION_REQUIRED`, `CHILDREN_PRESENT`, `NOT_FOUND` (with `upstream_status: 404`).
 
@@ -1123,7 +1653,12 @@ copy_issue(
 
 **Notes:**
 - Respects `REDMINE_MCP_READ_ONLY` — returns an error in read-only mode.
-- The target user must have permission to create issues in the destination project.
+- OAuth: requires `view_issues`, `copy_issues`, and `add_issues` on the token.
+  Redmine checks `copy_issues` on the **source** project (the issue being
+  copied) and `add_issues` on the **target** project (where the copy is
+  created; defaults to the source project when `project_id` is omitted).
+- The target user must have the matching role permissions in those projects,
+  not only the OAuth scopes on the token.
 
 ---
 
@@ -1216,13 +1751,17 @@ Edit text or toggle privacy of a Redmine journal entry (issue note). `get_privat
 
 **Parameters:**
 - `action` (string, required): Allowed: `edit`, `set_private`
-- `journal_id` (integer, required): ID of the journal entry (from `get_redmine_issue` with `include_journals=true`)
-- `notes` (string): New notes text (may be empty to clear). Required for `action="edit"`
+- `journal_id` (integer, required): ID of the journal entry (from `get_redmine_issue` with `include_journals=true`). Each journal in that response also carries `notes_sha256`, the digest of its raw notes, for `notes_expected_sha256`
+- `notes` (string): New notes text (may be empty to clear). For `action="edit"`, one of `notes` or `notes_upload_id` is required and they are mutually exclusive
+- `notes_upload_id` (string, optional): Take the new note from a file staged with [`create_upload_ticket`](#create_upload_ticket), decoded as UTF-8. **Prefer this for a long note** — the text goes from disk to the server instead of being written out into the tool argument, which is slow for a long one and drops characters. The response then carries `notes_length` and `notes_sha256` instead of the note itself, since echoing it back would put the whole thing in the conversation anyway
+- `notes_edits` (list, optional): Change part of a long note in place: `{find, replace}` pairs applied in order on the server. Each `find` must occur **exactly once** in the note as it stands after the preceding edits; zero matches or several refuse the whole call and write nothing. **Requires `issue_id`.** Mutually exclusive with `notes` and `notes_upload_id`
+- `notes_expected_sha256` (string, optional): the digest the note had when it was read. **Echo back the `notes_sha256` each journal carries** — do not hash the `notes` you read, they are wrapped in boundary tags whose id changes per call. Checked before any edit; a mismatch refuses the call rather than overwriting whatever changed in between
+- `issue_id` (integer, optional): the issue the journal belongs to. **Required with `notes_edits` and ignored otherwise** — patching reads the note first, and Redmine offers no endpoint for a single journal, so it can only be read through its issue. A `journal_id` that is not among that issue's visible journals is refused and nothing is written
 - `private_notes` (boolean, optional): Optionally toggle the private flag during `edit`
 - `is_private` (boolean): Required for `action="set_private"` — `true` to mark private, `false` to make public
 
 **Returns:**
-- `edit`: `{"success": true, "journal_id": ..., "notes": ..., "private_notes": ...}`
+- `edit`: `{"success": true, "journal_id": ..., "notes": ..., "private_notes": ...}`, or with `notes_upload_id` `{"success": true, "journal_id": ..., "notes_length": ..., "notes_sha256": ..., "private_notes": ...}`
 - `set_private`: `{"success": true, "journal_id": ..., "private_notes": <bool>}`
 - Error: `{"error": "..."}`
 
@@ -1253,6 +1792,7 @@ Retrieve only the private notes (journals with `private_notes=true`) of an issue
 
 **Parameters:**
 - `issue_id` (integer, required): ID of the issue.
+- `include_journal_values` (boolean, optional): Return the before/after text of any field changes on these journals in full rather than by length. Default: `false`, as for `get_redmine_issue`.
 
 **Returns:** List of journal dictionaries where `private_notes` is `true`. Journals with empty note bodies are omitted.
 
@@ -1300,6 +1840,14 @@ manage_issue_category(action="delete", category_id=3, reassign_to_id=7)
 
 ## MCP Apps (Interactive Tools)
 
+Both views are self-contained HTML, so their `ui://` resources declare an
+empty Content Security Policy (`connectDomains: []`, `resourceDomains: []`)
+in `_meta.ui`. No widget `domain` is declared: its format is host-specific
+(Claude and ChatGPT use different schemes) and hosts fall back to their own
+sandbox origin when it is omitted. ChatGPT's plugin inspector therefore still
+shows a "Widget domain is not set" notice; that only matters for a ChatGPT
+app directory submission and does not affect rendering.
+
 ### `show_triage_board`
 
 Render an interactive Kanban board of a project's issues (MCP Apps). Columns
@@ -1339,6 +1887,33 @@ rendering.
 Backend data source for the dashboard's Refresh action. Returns the same
 payload as `show_project_dashboard` without a UI resource. App-only; called
 by the dashboard's iframe, not normally invoked directly.
+
+### `show_project_timeline`
+
+Render a project's schedule as an interactive timeline (MCP Apps): issue bars
+from start and due dates, grouped by target version, a milestone diamond on
+each version's due date, a Today line, and a Done section for work closed in
+the window. Click a bar or milestone for details. Prefer `get_gantt_chart` for
+raw timeline data or dependency analysis. Read-only. Requires a client that
+supports MCP Apps rendering.
+
+An issue with no due date ends at its version's due date, and a closed issue
+with no due date ends on the day it closed. Issues with no dates at all are
+counted as unscheduled. Dates use the server's UTC day.
+
+**Parameters:**
+- `project_id` (int | str, required): project to display.
+- `start_date` (str, optional): window start, `YYYY-MM-DD`. Without dates the window fits the data, within about 3 months of today; with one date the other is set 90 days away.
+- `end_date` (str, optional): window end, `YYYY-MM-DD`, at most 366 days after `start_date`.
+- `filters` (dict, optional): extra Redmine filters, same as `list_redmine_issues`. `project_id`, `status_id`, `closed_on`, `start_date`, `sort`, `limit` and `offset` are refused.
+
+Fetches up to 250 open issues with a start date, 250 without, and 250 closed; the view says so when a project has more.
+
+### `get_project_timeline_data`
+
+Backend data source for the timeline's Refresh action. Returns the same
+payload as `show_project_timeline` without a UI resource. App-only; called by
+the timeline's iframe, not normally invoked directly.
 
 ---
 
@@ -1601,11 +2176,16 @@ list_redmine_users(name="alice")
 
 ### `get_current_user`
 
-Retrieve the currently authenticated user's profile. Resolves to `GET /my/account.json`, so works for any authenticated user (not admin-only). Useful when a user asks the LLM to do something "for me" — the LLM can call this to resolve the current user's ID.
+Retrieve the currently authenticated user's profile. Resolves to `GET /users/current.json`, and works for any authenticated user (not admin-only) -- Redmine exempts the `show` action from its admin filter and resolves the `current` id behind a plain login check. Useful when a user asks the LLM to do something "for me" -- the LLM can call this to resolve the current user's ID.
 
-**Parameters:** None.
+With `include_memberships` it also answers "which projects am I a member of, and with which roles" in the same request. The alternative is `list_project_members` once per project.
 
-**Returns:** Dict with `id, login, firstname, lastname, mail, admin, created_on, last_login_on`.
+**Parameters:**
+- `include_memberships` (boolean, optional): Add `memberships` to the response. Default `false`. Costs no extra request -- the include rides the same call.
+
+**Returns:** Dict with `id, login, firstname, lastname, mail, admin, created_on, last_login_on`. With `include_memberships`, also `memberships`: a list of `{id, project: {id, name}, roles: [{id, name}]}` entries. A role inherited from a group membership carries `inherited: true`; Redmine omits the key for a direct role, and so does this tool. Redmine limits the list to projects visible to the caller, which covers active and closed projects but not archived ones -- so an empty list means "holds none that are visible", not necessarily "holds none".
+
+Groups are deliberately not offered as an include: Redmine gates that block on the caller being an admin, so a non-admin would get a success response with the key simply missing -- indistinguishable from "belongs to no groups".
 
 **Example:**
 ```json
@@ -1618,6 +2198,25 @@ Retrieve the currently authenticated user's profile. Resolves to `GET /my/accoun
   "admin": false,
   "created_on": "2025-01-15T10:00:00",
   "last_login_on": "2026-04-16T09:30:00"
+}
+```
+
+**Example** (`include_memberships=True`):
+```json
+{
+  "id": 5,
+  "login": "alice",
+  "admin": false,
+  "memberships": [
+    {
+      "id": 12,
+      "project": {"id": 1, "name": "Website"},
+      "roles": [
+        {"id": 3, "name": "Developer"},
+        {"id": 4, "name": "Manager", "inherited": true}
+      ]
+    }
+  ]
 }
 ```
 
@@ -1772,17 +2371,34 @@ List, get, create, update, delete, or rename a Redmine wiki page. Replaces `list
 - `wiki_page_title` (string): Wiki page title. Required for all actions except `list`
 - `version` (integer, optional): Specific version number for `get` (default: latest)
 - `include_attachments` (boolean, optional): Include attachment metadata in `get` response. Default: `true`
-- `text` (string): Page content. Required for `create` and `update`
+- `text` (string): Page content. Required for `create`. Required for `update` unless `uploads` is provided, in which case the server reuses the page's current text
 - `comments` (string, optional): Change log comment for `create` and `update`
+- `parent_title` (string, optional): Title of the page this page sits under, for `create` and `update`. Omit it and an existing parent is left untouched; pass a title to file the page under it; pass `""` to move the page back to the wiki root. The parent must already exist in the same project -- Redmine rejects an unknown parent with a 422 that carries no error text, so the tool substitutes a message naming `parent_title` as the likely cause. `rename` keeps the current parent on its own; reparent with `update`
 - `new_title` (string): New title for `rename` (must differ from `wiki_page_title`)
 - `redirect_existing_links` (boolean, optional): When `true` (default), `rename` creates a `WikiRedirect` from the old title to the new title
+- `uploads` (list, optional): Files to attach to the page on `create` and `update`. Requires the `edit_wiki_pages` permission on the project. Maximum 10 items. Each item is an object with:
+  - Exactly ONE source key:
+    - `upload_id` (string): A file staged with `create_upload_ticket`. **The way to send a file that lives on the caller's own machine** — the caller POSTs the bytes to the ticket's `upload_url` in one request, so they go from disk to the server directly and are never written into a tool argument. Filename defaults to the one the ticket was created with.
+    - `source_url` (string): HTTP(S) URL the server fetches. Filename is derived from the URL or `Content-Disposition` if omitted.
+    - `content_base64` (string): Raw file bytes encoded as base64. `filename` is required when using this source. For small content the caller **generated**, not for a file on disk: the payload is written out character by character by the model and a long one does not reliably survive that. Pass `sha256` with it.
+    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem, so it reaches the caller's own files only where the server runs on the caller's machine; against a server on a different host it cannot, whatever the roots are set to.
+  - `filename` (string, optional): Name the attachment will have in Redmine. Required for `content_base64`; derived for other sources when omitted.
+  - `sha256` (string, optional) / `size_bytes` (integer, optional): what the caller meant to send. Checked after the content is resolved and before anything reaches Redmine; a mismatch refuses the whole call. Worth passing with `content_base64`, whose payload is written out by the model and can arrive mangled.
+  - `content_type` (string, optional): MIME type override (e.g. `"application/xml"`).
+  - `description` (string, optional): Human-readable description for the attachment.
+- `expected_version` (integer, optional): The `version` the page had when the caller read it, for an `update` that changes the text. Redmine answers a stale one with an edit conflict, where the write would otherwise overwrite the other edit silently. Pass it whenever the new text was derived from a page read earlier. With `text_edits` a page that has moved on is refused before anything is sent. Ignored on an attachment-only `update` and by the other actions: Redmine checks the version only when the text changes, and an attachment-only `update` and a `rename` already send the version they read along with the text they echo back.
+- `text_edits` (list, optional): Change part of a long page in place, for `update`: `{"find": ..., "replace": ...}` pairs applied in order on the server. **Prefer this to `text` for a long page**, which would otherwise be written out in full into the tool argument. Each `find` must occur exactly once in the page as it stands after the preceding edits; zero matches or several refuse the whole call and change nothing. Line endings are normalized for matching and the page's own convention is restored on the way out. The write carries the version that was patched, so an edit landing in between is an edit conflict. Mutually exclusive with `text` and `text_upload_id`.
+- `text_upload_id` (string, optional): Take the whole page from a file staged with [`create_upload_ticket`](#create_upload_ticket), decoded as UTF-8, for `create` and `update`. For a long page that really is all new. Mutually exclusive with `text` and `text_edits`.
 
 **Returns:**
 - `list`: array of page metadata dicts (`title`, `version`, `parent_title` if present, `created_on`, `updated_on`) — no body text
-- `get`/`create`/`update`: full wiki page dict (`title`, `text`, `version`, `created_on`, `updated_on`, `author`, `project`, `attachments` when applicable)
+- `get`/`create`/`update`: full wiki page dict (`title`, `text`, `version`, `created_on`, `updated_on`, `author`, `project`, `parent_title`, `attachments` when applicable). `project` is only returned by Redmine 7.0+; earlier versions omit the key. `parent_title` is a plain string and is present only when the page has a parent, matching the key `list` already returns; a page at the wiki root omits it
+- `create`/`update` with `text_edits` or `text_upload_id`: the same dict with `text_length` in place of `text`, since echoing the page back would put it in the conversation after all
 - `delete`: `{"success": true, "title": ..., "message": ...}`
 - `rename`: `{"success": true, ...}` plus the renamed page's metadata
 - Error: `{"error": "..."}`
+
+**Attachment-only updates:** Redmine rejects a wiki update with a blank body (`422 Text field cannot be blank`), so when `uploads` is given without `text` the server re-reads the page and sends its current text back unchanged. The body is never routed through the model, and because the text is identical Redmine does not create a new revision. The request carries the version read during that fetch, so a concurrent edit returns an edit-conflict error rather than silently reverting the other author's work.
 
 **Examples:**
 
@@ -1811,6 +2427,31 @@ manage_redmine_wiki_page(
     comments="Initial creation",
 )
 
+# Create a page underneath another page
+manage_redmine_wiki_page(
+    action="create",
+    project_id="my-project",
+    wiki_page_title="Examples_REST_API",
+    text="See the parent page for the index.",
+    parent_title="Examples",
+)
+
+# Move an existing page under a parent, then back to the wiki root
+manage_redmine_wiki_page(
+    action="update",
+    project_id="my-project",
+    wiki_page_title="Examples_REST_API",
+    text="See the parent page for the index.",
+    parent_title="Examples",
+)
+manage_redmine_wiki_page(
+    action="update",
+    project_id="my-project",
+    wiki_page_title="Examples_REST_API",
+    text="See the parent page for the index.",
+    parent_title="",
+)
+
 # Update an existing page
 manage_redmine_wiki_page(
     action="update",
@@ -1830,6 +2471,28 @@ manage_redmine_wiki_page(
     wiki_page_title="Old_Title",
     new_title="New_Title",
 )
+
+# Attach a diagram and reference it with the draw.io macro in one call.
+# The macro accepts png, svg, xml, and drawio attachments.
+manage_redmine_wiki_page(
+    action="update",
+    project_id="my-project",
+    wiki_page_title="Architecture",
+    text="# Architecture\n\n{{drawio_attach(diagram.drawio)}}\n",
+    uploads=[{"file_path": "/srv/attachments/diagram.drawio"}],
+)
+```
+
+Note that the `redmine_drawio` plugin creates a new attachment every time a diagram is saved rather than replacing the previous one, so diagram attachments accumulate on the page and stale ones have to be deleted manually.
+
+```python
+# Attach a file without touching the page body.
+manage_redmine_wiki_page(
+    action="update",
+    project_id="my-project",
+    wiki_page_title="Architecture",
+    uploads=[{"source_url": "https://example.com/spec.pdf"}],
+)
 ```
 
 **Notes:**
@@ -1841,6 +2504,128 @@ manage_redmine_wiki_page(
 - The `rename` action implements `PUT /projects/{id}/wiki/{old_title}.json` and fetches the existing text automatically since Redmine requires `text` on every wiki update.
 
 ---
+
+## News
+
+Project announcements: release notes, maintenance windows, rollout notices.
+Reading has been in the REST API since Redmine 1.1; creating, updating and
+deleting arrived in 4.1, so `manage_redmine_news` and `delete_redmine_news`
+answer with an error on a server without them rather than appearing to work.
+
+Three properties of this API are worth knowing, because each is a place
+where a call can look successful, or fail for the wrong stated reason:
+
+- **Every write comes back without a body.** Redmine answers create, update
+  and delete with 204. python-redmine compensates on create by re-reading
+  `news.filter(**self.params)[0]`; those params carry the posted
+  `project_id`, so the read-back is scoped to that project and the remaining
+  race is someone else posting to the *same* project in the same instant.
+  Narrow, but real, so the read-back is verified against the title that was
+  sent; when it cannot be confirmed the tool returns `confirmed: false` with
+  a `CREATE_UNCONFIRMED` code and the values it sent, instead of a
+  neighbour's record with a plausible id.
+- **A 403 can mean the news module is off, or just a missing permission.**
+  Redmine checks the module before it checks any permission, so a module-less
+  project refuses an administrator too and reads like a missing right. The two
+  look identical on the wire, so the tools read the project's modules back and
+  return `NEWS_MODULE_DISABLED` only when the module really is off, pointing
+  at `get_project_modules`; an ordinary denial keeps the plain permission
+  error. This applies to the reads as well -- `list_redmine_news` with a
+  `project_id` hits the same gate. Where the project cannot be determined,
+  as on a `get_redmine_news` whose item is itself refused, nothing is
+  claimed.
+- **A 404 on create can mean the endpoint is missing, not the project.**
+  `News.redmine_version` is `(1, 1, 0)` for the whole resource, so
+  python-redmine raises no version error of its own. When the create 404s but
+  the project still reads back, the tools return `NEWS_WRITE_UNSUPPORTED`
+  rather than letting the caller hunt for a project that is right there. The
+  message names the endpoint, not a version: core Redmine has routed create,
+  update and delete since 4.0 and accepted API auth on them since 4.1, so a
+  404 here says something about the distribution.
+
+The list endpoint takes `project_id` as a query parameter rather than in the
+path, because python-redmine's `News.query_filter` is `/news.json` with no
+placeholder. Redmine narrows on it either way, and answers 404 for a project
+that does not exist -- which `list_redmine_news` reports as `NOT_FOUND`.
+
+### list_redmine_news
+
+Lists news, newest first, across every visible project or narrowed to one.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_id` | int \| str \| null | `null` | Restrict to one project (numeric id or identifier) |
+| `limit` | int | `25` | Maximum items, 1-100 |
+| `offset` | int | `0` | Items to skip |
+
+Returns a list of `{id, project, author, title, summary, description,
+created_on}`. Comments and attachments are not included -- the list endpoint
+does not serve them; use `get_redmine_news` for one item's full context.
+
+Requires the `view_news` permission.
+
+### get_redmine_news
+
+Reads one news item together with its discussion.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `news_id` | int | required | The news item |
+| `include_comments` | bool | `true` | Include the comment thread |
+| `include_attachments` | bool | `true` | Include attachment metadata |
+
+Both includes default to on: a news item without its comments is usually
+just three fields, and the discussion is where the follow-up lives. `comments`
+and `attachments` appear only when requested *and* non-empty. An unknown id
+returns `code: NOT_FOUND`.
+
+Requires the `view_news` permission.
+
+### manage_redmine_news
+
+Creates or updates a news item. Needs a Redmine that exposes the news
+write endpoint, as core Redmine has since 4.1.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `action` | `"create"` \| `"update"` | required |
+| `project_id` | int \| str | Required for `create`; news cannot move between projects, so `update` ignores it |
+| `news_id` | int | Required for `update` |
+| `title` | str | Required for `create`, optional for `update` (cannot be blank) |
+| `summary` | str | One-line teaser. Optional; an empty string clears it on `update` |
+| `description` | str | The body. Required for `create`, optional for `update` (cannot be blank) |
+
+Redmine validates the presence of both `title` and `description`, so a
+create missing either is refused here with the field named, rather than
+passed on for a 422.
+
+Requires the `manage_news` permission -- Redmine has no finer split for
+news, so create and update carry the same one. Blocked in read-only mode.
+
+### delete_redmine_news
+
+Hard-deletes a news item, and its comments and attachments with it.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `news_id` | int | required | The news item |
+| `confirm_delete` | bool | `false` | Must be `true` to actually delete |
+
+Without `confirm_delete` the tool refuses and returns
+`code: CONFIRMATION_REQUIRED` with an `impact` preview naming the title and
+counting the comments and attachments that would go with it. This mirrors
+`delete_redmine_issue` and `delete_file`.
+
+Redmine has no endpoint for adding a comment to a news item, so the comments
+in `get_redmine_news` are read-only.
+
+Being its own tool rather than an action of `manage_redmine_news` is
+deliberate: a deployment restricting the exposed tools (see
+[Tool Allow List](#tool-allow-list)) can then offer announcements without
+offering their destruction, which the actions inside a `manage_X` tool
+cannot express.
+
+Requires the `manage_news` permission. Blocked in read-only mode.
 
 ## File Operations
 
@@ -1877,14 +2662,46 @@ List all files uploaded to a Redmine project's **Files** section (not issue atta
 
 ---
 
+### `create_upload_ticket`
+
+Reserve a slot for a file on the caller's own machine and return the URL to send it to. This is the only upload route whose bytes do not pass through the model: there is no way to pipe a file into a tool argument, so a `content_base64` payload is written out character by character and a long one does not reliably survive that.
+
+**Parameters:**
+- `filename` (string, optional): Name the attachment should get. Overridable later, but passing it now keeps the staged file recognisable.
+- `content_type` (string, optional): MIME type recorded with the staged file.
+
+**Returns:** `{upload_url, upload_id, ticket, filename, expires_at, max_bytes}`, or `{"error": ...}` when the server has no publicly reachable address (neither `PUBLIC_HOST` nor a routable `SERVER_HOST`) and therefore no URL to hand out.
+
+**Flow:**
+1. Call `create_upload_ticket`.
+2. Send the file to `upload_url` in one HTTP request, ticket in the `X-Upload-Ticket` header, the raw file as the body. The response carries `upload_id`, `size` and `sha256`. Multipart is deliberately not accepted — Starlette's `request.form()` buffers the whole body before its size can be checked, so the cap would not hold.
+3. Name that `upload_id` as the content source — in `uploads` on `create_redmine_issue`, `update_redmine_issue` or `manage_redmine_wiki_page`, or on `upload_file`. A staged file can also *be* a long text field rather than an attachment: `description_upload_id` on `create_redmine_issue` and `update_redmine_issue`, `notes_upload_id` on `manage_issue_note`, and `text_upload_id` on `manage_redmine_wiki_page`.
+
+```bash
+curl -sS -H "X-Upload-Ticket: $TICKET" --data-binary @mockup.png "$UPLOAD_URL"
+```
+
+**Notes:**
+- The ticket is good for **one** upload, for `REDMINE_MCP_UPLOAD_TICKET_MINUTES` (default 15), up to `max_bytes` (`REDMINE_MCP_UPLOAD_MAX_BYTES`, default 50 MiB). It authorises nothing else, which is why it can be handed to a model at all.
+- A reused or expired ticket is refused with 410; an unknown id or a wrong ticket with 404, deliberately indistinguishable so the endpoint cannot be used to probe which ids exist.
+- The staged file is swept on the same expiry as a downloaded attachment, so a failed attach can be retried without sending the file again.
+- `POST /uploads/{upload_id}` is guarded by the ticket, not by the MCP session's auth — the same capability model `/files/{file_id}` uses for downloads.
+
+---
+
 ### `upload_file`
 
 Upload a file to a Redmine project's Files section. Uses Redmine's standard two-step upload (`POST /uploads.json` for the token, then `POST /projects/{id}/files.json`).
 
-**Provide exactly ONE of `source_url`, `content_base64`, or `file_path`:**
-- `source_url` (string) — the server downloads from an HTTP(S) URL. Use this when chaining from another MCP tool that returns a download URL (e.g., Google Drive MCP's `get_drive_file_download_url`), or when the file is served by a local MCP on `localhost`. **Preferred when a URL is available** — no need for the caller to download and re-encode.
-- `content_base64` (string) — raw file bytes encoded as base64. Use this only when the caller already has the bytes in memory.
-- `file_path` (string): absolute path to a file already on the server. The path must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if `filename` is omitted.
+This is the project's document store, not an attachment on something. To attach a file to an issue, pass `uploads` to `create_redmine_issue` or `update_redmine_issue`; to a wiki page, pass `uploads` to `manage_redmine_wiki_page`. All three take the same content sources as this tool.
+
+**Provide exactly ONE of `upload_id`, `source_url`, `content_base64`, or `file_path`:**
+- `upload_id` (string) — a file staged with `create_upload_ticket`. **The way to send a file that lives on the caller's own machine**; the bytes never enter a tool argument.
+- `source_url` (string) — the server downloads from an HTTP(S) URL. Preferred whenever the file is already reachable at one, including chaining from another MCP tool that returns a download URL, since it spares the caller the bytes entirely.
+- `content_base64` (string) — raw file bytes encoded as base64. For content the caller **generated** and that is small: a short CSV, an SVG, a note. Not for a file on disk — the payload is written out by the model itself. Pass `sha256` with it.
+- `file_path` (string): a path read on **this server's own** filesystem, inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if `filename` is omitted. It reaches the caller's own files only where the server runs on the caller's machine; against a server on a different host a caller-side path cannot be read, whatever the roots are set to.
+
+`sha256` and `size_bytes` are optional on any source and verified after the content is resolved, before anything reaches Redmine.
 
 **Parameters:**
 - `project_id` (integer or string, required): Project identifier.
@@ -1893,7 +2710,7 @@ Upload a file to a Redmine project's Files section. Uses Redmine's standard two-
   - Optional with `source_url` or `file_path`, inferred from the URL path, `Content-Disposition` header, or file path if omitted, but always prefer passing an explicit filename.
 - `source_url` (string, conditional): HTTP(S) URL to download from.
 - `content_base64` (string, conditional): File content as base64.
-- `file_path` (string, conditional): Absolute path to a file on the server. Restricted to `ATTACHMENTS_DIR` and directories in `REDMINE_MCP_UPLOAD_FILE_ROOTS`.
+- `file_path` (string, conditional): Path to a file on **this server's** filesystem, restricted to `ATTACHMENTS_DIR` and directories in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. A caller-side path is unreachable when the server runs on a different host, whatever the roots are set to.
 - `description` (string, optional): Human-readable description.
 - `version_id` (integer, optional): Version/release ID to attach the file to (use `list_redmine_versions` to discover valid IDs).
 
@@ -1998,6 +2815,7 @@ Callers distinguish the two shapes via `uri_type`: `"http"` or `"file"`. Per the
 - Otherwise, `SERVER_HOST` is consulted; non-loopback values promote to HTTP mode. Loopback values (`localhost`, `127.0.0.1`, `0.0.0.0`) keep stdio mode because `SERVER_HOST` is the bind address and `0.0.0.0` is not a reachable URL host.
 - Otherwise stdio mode is used and `file_path` is returned.
 - Port is resolved via `PUBLIC_PORT` → `SERVER_PORT` → `8000`.
+- Scheme (#252): `PUBLIC_SCHEME` when set; otherwise `https` is derived from `PUBLIC_PORT=443`, else `http`. The port is omitted from the URL when it is the scheme's default (80 for http, 443 for https), so TLS-terminating reverse proxies get `https://host/files/...` instead of the unusable `http://host:443/files/...`.
 
 **Note (#110):** this tool returns its own MCP-proxy URL (HTTP mode) or local file path (stdio), so it is NOT affected by `REDMINE_PUBLIC_URL`. That env var rewrites `content_url` values returned by other tools (`get_redmine_issue.attachments[*].content_url`, `list_files`, etc.) from the internal Redmine origin to the configured public origin — see [`get_redmine_issue`](#get_redmine_issue).
 
@@ -2228,8 +3046,8 @@ Requires the **RedmineUP Products** plugin and `REDMINE_PRODUCTS_ENABLED=true`.
 - `fields` (dict): For `update`, fields to update. Allowed keys: `name`, `description`, `price`, `currency`, `status_id`, `code`, `project_id`, `category_id`, `tag_list`, `custom_fields`. Unknown keys are silently filtered
 
 **Returns:**
-- `list`: array of product dicts
-- `get`/`create`: product dict
+- `list`: array of product dicts, each with the keys `get` returns
+- `get`/`create`: product dict with `id`, `name`, `description`, `code`, `price`, `currency`, `status_id`, `project`, `category`, `author`, `tags`, `custom_fields`, `created_on`, `updated_on`. `tags` is read from the plugin's `tag_list` and the timestamps from its `created_at` / `updated_at`. `custom_fields` is `[]` when the product has none
 - `update`: `{"success": true, "product_id": N, "updated_fields": [...]}`
 - Error: `{"error": "..."}`
 
@@ -2263,40 +3081,52 @@ manage_product(action="update", product_id=42, fields={"price": 39.99})
 
 ---
 
-## Contacts / CRM (RedmineUP CRM plugin)
+## Contacts and Deals / CRM (RedmineUP CRM plugin)
 
-These tools require the **RedmineUP CRM** plugin and `REDMINE_CRM_ENABLED=true`.
+These tools require the **RedmineUP CRM** plugin. `manage_contact` and `list_contact_tags` need `REDMINE_CRM_ENABLED=true`; `manage_deal`, `list_deal_statuses` and `manage_deal_category` need `REDMINE_DEALS_ENABLED=true`; `add_deal_product` needs that plus `REDMINE_PRODUCTS_ENABLED=true`.
+
+The two flags are deliberately separate. Contacts and deals are separate Redmine *project modules* (`contacts` and `deals` in the plugin's `init.rb`), each with its own permission set, so a project reachable by `manage_contact` is not necessarily reachable by `manage_deal`. More importantly, the plugin's **Light** edition ships no deals at all — no `project_module :deals`, and therefore none of the `*_deals` permissions. Redmine derives its OAuth scope list from `Redmine::AccessControl.permissions` and applies `enforce_configured_scopes`, so on a Light install a deal scope cannot be held by the OAuth application and a client requesting it fails consent with `invalid_scope`. Advertising deals under `REDMINE_CRM_ENABLED` would therefore break contacts for Light deployments; a separate flag leaves them untouched.
 
 **Security note:** Contact PII (email, phone, address) is returned as-is to the caller but is never logged via this module's logger.
+
+**Acknowledgement:** RedmineUP provided an evaluation copy of the CRM PRO plugin (4.4.7) for verifying `manage_deal`, `list_deal_statuses` and `manage_crm_note` against real Pro instances on Redmine 6.1.1 and 7.0.0.
 
 ### `manage_contact`
 
 List, get, create, update, delete, or change project association for RedmineUP CRM contacts. Replaces `list_contacts`, `get_contact`, `create_contact`, `edit_contact`, `delete_contact`, `assign_contact_to_project`, and `remove_contact_from_project`.
 
-Requires the **RedmineUP CRM** plugin and `REDMINE_CRM_ENABLED=true`. Visibility scoping is enforced server-side by Redmine.
+Requires the **RedmineUP CRM** plugin and `REDMINE_CRM_ENABLED=true`. Visibility scoping is enforced server-side by Redmine. In OAuth mode the token must also carry the CRM permissions (`view_contacts`, `view_private_contacts`, and `add_contacts` / `edit_contacts` / `delete_contacts` for writes); enabling the flag advertises them as scopes, and the OAuth application has to grant them.
 
 **Parameters:**
 - `action` (string, required): Allowed: `list`, `get`, `create`, `update`, `delete`, `assign_to_project`, `remove_from_project`
 - `project_id` (integer or string): For `list`, optional project filter. For `create`, required (project to associate the new contact with). For `assign_to_project` / `remove_from_project`, the project to attach to or detach from
-- `search` (string, optional): For `list`, free-text search (matches name/company/email)
+- `search` (string, optional): For `list`, free-text search (matches name/company/email). Redmine applies it to the page it returns without narrowing the reported total, so paging through a search is unreliable beyond the first page
 - `tags` (string, optional): For `list`, comma-separated tag filter
 - `assigned_to_id` (integer, optional): For `list`, filter by assignee user ID
 - `limit` (integer, optional): For `list`, max results per call (default `100`, capped at 100 by Redmine)
+- `offset` (integer, optional): For `list`, contacts to skip — needed to page past the first 100
+- `include_pagination_info` (boolean, optional): For `list`, return `{"contacts": [...], "pagination": {...}}` instead of a bare array. Default: `false`. The same envelope and the same keys as [`list_redmine_issues`](#list_redmine_issues) -- `total`, `limit`, `offset`, `count`, `has_next`, `has_previous`, `next_offset`, `previous_offset`
+- `include_custom_fields` (boolean, optional): For `list`, return each contact's `custom_fields` values. Default: `false`. Costs no extra request -- the CRM API renders every custom field on every contact whether or not it carries a value (`render_api_custom_values` is unconditional in the plugin's `contacts/index.api.rsb`), so the data is already in the payload. It is the larger half of a contact row, which is why the collection does not return the values unasked. Without it the key is elided rather than dropped, the way a long journal value is: `custom_fields` is `null` and `custom_fields_count` says how many were withheld, so `null` ("not requested") stays distinguishable from `[]` ("this contact has none"). `get` and `create` return the values always
+- `custom_field_ids` (array of integers, optional): For `list`, return only these custom fields in each contact's `custom_fields`, e.g. `[42, 43]`, in the order the payload carries them. Implies `include_custom_fields`. The IDs are each entry's `id`, the same number a `cf_42` filter uses. As with `include_custom_fields`, no `custom_fields_count` comes back, and `[]` means the contact carries none of the fields named -- an ID no contact carries is not an error. An empty list, or any entry that is not a positive integer, is refused
 - `contact_id` (integer): Required for all actions except `list` and `create`
-- `include` (string, optional): For `get`, comma-separated includes (`notes`, `deals`, `contacts`)
-- `first_name` (string): Required for `create`
-- `last_name`, `company`, `email`, `phone` (string, optional): For `create`
-- `is_company` (boolean, optional): For `create`. `true` to mark as a company entity (default `false`)
+- `include` (string, optional): For `get`, comma-separated, any of `notes`, `contacts` (a company's people), `deals` and `issues` (issues linked to the contact) -- the four the plugin's `contacts/show.api.rsb` renders on request. Each comes back under its own key. Redmine ignores any other name without an error. The plugin leaves an array out when it is empty or the caller may not see it (`deals` needs `view_deals`, `issues` needs `view_issues`), so an absent key means "none visible" rather than "not supported"
+- `first_name` (string): Required for `create`. Filters a `list` where `REDMINE_CRM_EDITION=pro`
+- `last_name`, `middle_name`, `company`, `job_title`, `email`, `phone` (string, optional): For `create`, attributes of the new contact. On `list` they filter server-side, but only the CRM plugin's Pro build registers them as query filters — so they are refused unless `REDMINE_CRM_EDITION=pro`, because Redmine ignores an unregistered filter parameter silently and would answer with the whole collection rather than an error
+- `author_id` (integer, optional): For `list`, filter by the ID of the user who created the contact. Also needs `REDMINE_CRM_EDITION=pro`
+- `filters` (dict, optional): For `list`, additional Redmine query parameters, for filters this signature does not name, most usefully `{"cf_42": "value"}` to filter on a contact custom field. Unlike the named parameters this is not gated on `REDMINE_CRM_EDITION`, so it forwards the key without promising Redmine honours it: confirm a narrow filter actually narrowed. A contact custom field needs its **Used as a filter** setting on, and on the Light build no contact custom field is ever a registered filter. **Accepted keys:** the filters `ContactQuery` registers (`ids`, `first_name`, `last_name`, `middle_name`, `job_title`, `company`, `phone`, `email`, `full_address`, `street1`, `street2`, `city`, `region`, `postcode`, `country`, `is_company`, `last_note`, `has_deals`, `has_open_issues`, `tags`, `author_id`, `assigned_to_id`, `created_on`, `updated_on`), plus `cf_<id>`, its chained spellings, and `author.cf_<id>` and `assigned_to.cf_<id>`. Any other key is refused with an error naming that set: a key Redmine would not read as a filter can still be read by another layer of the request (`key` is taken as the API key ahead of the header). Keys this signature already names are refused too, pass them as the named parameter so they are validated, as are `fields`, `f` and `query_id`, which Redmine reads as the query's own definition and which discard every filter built from the rest of the request. **Accepted values:** each value is a single scalar (string, integer, float, `date` or `datetime`); lists, dicts, `None` and `bool` are refused. Write a yes/no filter as `"1"` or `"0"`
+- `is_company` (boolean, optional): For `create`, `true` to file the record as a company rather than a person (left out, a person). For `list`, `true` returns only companies and `false` only people; left out, both. Like the other contact attributes it filters a `list` only where `REDMINE_CRM_EDITION=pro`. It is sent as `is_company=!0` or `is_company=0`, because the plugin reads a value as true only when it matches the database adapter's own spelling of true, which varies by adapter and Rails version; `0` is false on every adapter and `!0` is its negation
 - `visibility` (integer, optional): For `create`. `0`=Project (default), `1`=Public, `2`=Private
 - `fields` (dict): For `update`, fields to update. Allowed keys: `first_name`, `last_name`, `middle_name`, `company`, `job_title`, `phone`, `email`, `website`, `skype_name`, `birthday`, `background`, `address_attributes`, `tag_list`, `is_company`, `assigned_to_id`, `custom_fields`, `visibility`, `project_id`. For `create`, additional fields beyond the named parameters
 
 **Returns:**
-- `list`: array of contact dicts
-- `get`/`create`: contact dict
+- `list`: array of contact dicts -- or, with `include_pagination_info=true`, `{"contacts": [...], "pagination": {...}}`. A listed contact carries `custom_fields` values only under `include_custom_fields=true`, or just the fields named under `custom_field_ids`; otherwise that key is `null` and `custom_fields_count` carries the number withheld
+- `get`/`create`: contact dict, `custom_fields` values included. `get` adds each requested include the plugin rendered: `notes` as `{id, content, type_id, author, created_on, updated_on}`, `contacts` as `{id, name}`, `deals` as `{id, name, price, currency, price_type, project, status, background, created_on, updated_on}`, and `issues` as `{id, subject, status, due_date, created_on, updated_on}`
 - `update`: `{"success": true, "contact_id": N, "updated_fields": [...]}`
 - `delete`: `{"success": true, "contact_id": N, "message": ...}`
 - `assign_to_project` / `remove_from_project`: `{"success": true, "contact_id": N, "project_id": ...}`
 - Error: `{"error": "..."}`
+
+A contact dict carries `custom_fields` (id/name/value), `author`, `assigned_to`, `tags`, the `emails` and `phones` arrays the CRM API renders — with `email` and `phone` holding the first entry of each — and the `address` sub-document as the plugin names it. `projects` is present only when the API sent it, which it does for a single contact and not for a collection, so an absent key means "not returned" rather than "none".
 
 **Examples:**
 
@@ -2309,6 +3139,34 @@ manage_contact(
     assigned_to_id=5,
     limit=50,
 )
+
+# Page a large CRM, and see from the response how much is left
+manage_contact(
+    action="list",
+    limit=100,
+    offset=0,
+    include_pagination_info=True,
+)
+# Returns:
+# {
+#   "contacts": [...],
+#   "pagination": {
+#     "total": 250,
+#     "limit": 100,
+#     "offset": 0,
+#     "count": 100,
+#     "has_next": true,
+#     "has_previous": false,
+#     "next_offset": 100,
+#     "previous_offset": null
+#   }
+# }
+
+# Read two custom fields off every contact, not all of them
+manage_contact(action="list", custom_field_ids=[42, 43])
+# Each row carries just those two:
+#   "custom_fields": [{"id": 42, "name": "Account Owner", "value": "..."},
+#                     {"id": 43, "name": "Tier", "value": "..."}]
 
 # Fetch a single contact with related notes and deals
 manage_contact(action="get", contact_id=42, include="notes,deals")
@@ -2339,9 +3197,184 @@ manage_contact(action="remove_from_project", contact_id=42, project_id="support"
 
 **Notes:**
 - `list` and `get` are allowed in read-only mode; `create`, `update`, `delete`, `assign_to_project`, and `remove_from_project` are blocked when `REDMINE_MCP_READ_ONLY=true`.
-- **PII handling:** contact `email`, `phone`, `address`, `birthday`, `website` are returned as-is to the caller; the module never logs them. Error messages reference only `contact_id`. User-controlled display fields (`first_name`, `last_name`, `middle_name`, `company`, `job_title`, `background`, `assigned_to.name`) are wrapped in `<insecure-content>` boundary tags so downstream LLMs treat them as untrusted data.
+- **Pagination metadata.** `total` is the `total_count` the contacts response carries alongside the collection itself, so it costs no extra request and a truncated read is visible without paging until an empty page comes back. The CRM plugin renders it: `app/views/contacts/index.api.rsb` wraps the array in `api_meta(:total_count => @contacts_count, :offset => @offset, :limit => @limit)` (confirmed on 4.4.5 Pro).
+- **`has_next` is measured, not guessed.** A further page exists when `offset + limit` is below the total, rather than when "the page came back full", so a collection whose size is an exact multiple of the page size is not reported as having one more page than it has. `list_redmine_issues` still infers `has_next` from a full page and can be wrong on that boundary.
+- **`total` is `null` when no reported total measures the collection being paged.** Read it as "not reported", never as a number. Two cases produce it. A build that renders no `total_count` at all is one. The other is `search`: `ContactsController#index` counts with `@query.object_count`, which applies the query filters but *not* `params[:search]` -- `ContactQuery` registers no `search` filter -- while the rows come from `results_scope(:search => ...)`. The reported total therefore describes the collection before the search, so it is not offered as this page's total. Every other narrowing parameter this tool sends (`project_id`, `tags`, `assigned_to_id`, `author_id` and the Pro attribute filters) *is* a registered filter, so those narrow the count too and `total` stays exact. Whenever `total` is `null`, `has_next` falls back to the full-page inference rather than going `null` too, because a `null` is falsy and a caller testing it would stop mid-collection.
+- **What the other keys mean.** `count` is the contacts actually returned in this response. `limit` and `offset` are the window Redmine reports having applied, falling back to the requested values when it reports none, so `next_offset` lands on a real page boundary even if a build serves a smaller page than was asked for. `has_previous` and `previous_offset` follow `offset` alone and never depend on the total.
+- **PII handling:** contact `email`, `phone`, `address`, `birthday`, `website` are returned as-is to the caller; the module never logs them. Error messages reference only `contact_id`.
+- **Prompt-injection wrapping:** `background` is free text and is wrapped in `<insecure-content>` boundary tags. Display fields (`first_name`, `last_name`, `middle_name`, `company`, `job_title`, `assigned_to.name`), and the `address` sub-document are returned verbatim, matching the policy set in #109 for short label-shaped values elsewhere in the server. Custom field values are returned verbatim too, consistent with issue custom fields — but note a `text`-format field holds free text rather than a short label, so treat those as untrusted.
+
+### `manage_deal`
+
+List, get, create, update, or delete RedmineUP CRM deals.
+
+Requires the **RedmineUP CRM** plugin in its **Pro** edition, `REDMINE_DEALS_ENABLED=true`, and the `deals` project module enabled on the project. Visibility scoping is enforced server-side by Redmine. In OAuth mode the token must also carry the deal permissions (`view_deals`, plus `add_deals` / `edit_deals` / `delete_deals` for writes); enabling the flag advertises them as scopes, and the OAuth application has to grant them.
+
+**Parameters:**
+- `action` (string, required): Allowed: `list`, `get`, `create`, `update`, `delete`
+- `project_id` (integer or string): For `list`, optional project filter. For `create`, required (project to create the deal in)
+- `search` (string, optional): For `list`, free-text search (matches the deal name)
+- `status_id` (integer or string, optional): For `list`, filter by deal status. A numeric id, or one of `"o"` (open, the default Redmine applies anyway), `"c"` (won/lost), `"*"` (any status). For `create`, the status to open the deal in (numeric id only)
+- `assigned_to_id` (integer, optional): For `list`, filter by assignee user ID
+- `limit` (integer, optional): For `list`, max results per call (default `100`, capped at 100 by Redmine)
+- `deal_id` (integer): Required for `get`, `update`, and `delete`
+- `include` (string, optional): For `get`, comma-separated includes: `notes`, and `lines` (product lines, when the Products plugin is installed)
+- `name` (string): Required for `create`
+- `contact_id` (integer, optional): For `create`, the contact the deal belongs to
+- `assigned_to_id` (integer, optional): For `list`, filter by assignee. For `create`, the user to assign the new deal to
+- `price` (number or string, optional), `currency` (string, optional), `due_date` (string, optional): For `create`
+- `fields` (dict): For `update`, fields to update. Allowed keys: `name`, `background`, `currency`, `price`, `price_type`, `duration`, `project_id`, `author_id`, `assigned_to_id`, `status_id`, `contact_id`, `category_id`, `probability`, `due_date`, `custom_field_values`, `custom_fields`, `watcher_user_ids`. For `create`, additional fields beyond the named parameters
+
+**Returns:**
+- `list`: array of deal dicts
+- `get`/`create`: deal dict with `id`, `name`, `price`, `currency`, `price_type`, `duration`, `probability`, `due_date`, `background`, `project`, `status`, `category`, `author`, `contact`, `assigned_to`, `related_contacts`, `created_on`, `updated_on`. A `notes` key is added only when `include="notes"` was requested and the plugin returned notes, so its absence means "not requested" rather than "none". `custom_fields` is accepted on writes but not returned. `manage_product` differs, returning `custom_fields` on `list`, `get` and `create`, as does `manage_document` on `get`; `manage_contact` returns contact `custom_fields` on `get` and `create`, and on `list` under `include_custom_fields` or `custom_field_ids`
+- `update`: `{"success": true, "deal_id": N, "updated_fields": [...]}`
+- `delete`: `{"success": true, "deal_id": N, "message": ...}`
+- Error: `{"error": "..."}`
+
+**Examples:**
+
+```python
+# List open deals in a project for one assignee (open is Redmine's default)
+manage_deal(action="list", project_id="sales", assigned_to_id=5, limit=50)
+
+# Every deal regardless of status, including won and lost
+manage_deal(action="list", project_id="sales", status_id="*")
+
+# Fetch a single deal with its notes
+manage_deal(action="get", deal_id=9, include="notes")
+
+# Create a deal against a contact
+manage_deal(
+    action="create",
+    project_id="sales",
+    name="ACME renewal",
+    contact_id=42,
+    price="1500",
+    currency="USD",
+    due_date="2026-12-01",
+)
+
+# Move a deal to another status
+manage_deal(action="update", deal_id=9, fields={"status_id": 3})
+
+# Delete a deal
+manage_deal(action="delete", deal_id=9)
+```
+
+**Notes:**
+- `list` and `get` are allowed in read-only mode; `create`, `update`, and `delete` are blocked when `REDMINE_MCP_READ_ONLY=true`.
+- **`list` returns only OPEN deals unless you ask for more.** `DealQuery` seeds itself with a `status_id` filter on operator `o`, the same default `/issues.json` applies, so won and lost deals are absent from an unfiltered call. Pass `status_id="*"` for all statuses, `"c"` for won and lost, or a numeric id for one status — `status_id` is a `:list_status` filter, so Redmine accepts those operators alongside a plain id.
+- **All five actions require `view_deals`.** `deals#index` is excluded from `before_action :authorize` but then runs `find_optional_project`, whose Redmine implementation calls `authorize_global`, so it is authorized too — a caller without the permission gets a permission error, not an empty list. `Deal.visible` narrows what a permitted caller sees; it does not substitute for the check.
+- **`price` is sent as a string.** The plugin parses it with `String#gsub!` against the instance's configured thousands and decimal separators, so a JSON number raises `NoMethodError` server-side. Pass an unformatted value such as `"1500.5"`; pre-formatted input is reinterpreted per those settings.
+- **`status_id` and `category_id` come from `list_deal_statuses`.** The plugin's `GET /deal_statuses.json` is `require_admin`, so for a non-admin token that tool returns `statuses: null` with a `statuses_error`; read status ids off an existing deal's `status` ref in that case (`manage_deal(action="list", status_id="*")`). Categories are per project and always readable.
+- `background` is wrapped in `<insecure-content>` boundary tags so downstream LLMs treat it as untrusted data. `name` and the `id`/`name` refs are short label-shaped fields and are returned verbatim, matching `subject` on issues.
 
 ---
+
+### `list_deal_statuses`
+
+List RedmineUP CRM deal statuses and, for a given project, its deal categories. Call it before `manage_deal(action="create")`, which needs a numeric `status_id`.
+
+Requires `REDMINE_DEALS_ENABLED=true` and the CRM plugin's **Pro** edition. Read-only (`readOnlyHint=true`).
+
+**Parameters:**
+- `project_id` (integer or string, optional): when given, the project's deal categories are included.
+
+**Returns:**
+- `statuses`: list of `{id, name, position, is_default, status_type, status_type_id, color}` ordered by position; `status_type` is `open`, `won` or `lost`.
+- `categories`: list of `{id, name}`; present only when `project_id` was given.
+- `project_id`: echoed back when given.
+
+**Admin-only statuses:** the plugin's `DealStatusesController#index` is restricted to Redmine administrators (`require_admin`), which no permission or OAuth scope can grant. For a non-admin user `statuses` is `null` and `statuses_error` explains why, while `categories` is still returned. Status ids can then be read off existing deals via `manage_deal(action="list", status_id="*")`.
+
+**Example:**
+```json
+{"statuses": [{"id": 1, "name": "New", "position": 1, "is_default": true, "status_type": "open", "status_type_id": 0, "color": "FFFFFF"}],
+ "categories": [{"id": 3, "name": "Enterprise"}],
+ "project_id": "sales"}
+```
+
+### `manage_crm_note`
+
+Get, create, update, or delete RedmineUP CRM notes, the activity log attached to contacts and deals.
+
+Available when `REDMINE_CRM_ENABLED=true` or `REDMINE_DEALS_ENABLED=true`. A note on a deal additionally requires deals enabled; a note on a contact requires CRM enabled. `get`, `update` and `delete` look the note up first and apply the same rule to its actual source, so a bare `note_id` cannot reach a disabled family. There is no list action: read a parent's notes with `manage_deal(action="get", include="notes")`.
+
+**Parameters:**
+- `action` (string, required): `get`, `create`, `update`, `delete`
+- `note_id` (integer): required for `get`, `update`, `delete`
+- `source_type` (string): `create` only, required: `contact` or `deal`
+- `source_id` (integer): `create` only, required
+- `project_id` (integer or string): `create` only, required. The plugin resolves the note's project from it and answers 404 without it
+- `content` (string): required on `create`, optional on `update`
+- `subject` (string, optional)
+- `type_id` (integer, optional): `0` email, `1` call, `2` meeting
+
+**Returns:** `get`/`create` a note dict `{id, source {id, name, type}, subject, content, type_id, note_type, author, created_on, updated_on}` (`content` is wrapped in `<insecure-content>` boundary tags, timestamps are ISO-8601); `update` `{success, note_id, updated_fields}`; `delete` `{success, note_id, message}`.
+
+**Permissions:** the plugin checks `delete_notes` (or `delete_own_notes` for the author) for both editing and deleting. In OAuth mode enabling either CRM flag advertises `add_notes`, `delete_notes` and `delete_own_notes` as scopes.
+
+**Example:**
+```json
+{"action": "create", "source_type": "deal", "source_id": 12, "project_id": "sales", "content": "Called, they want a revised quote by Friday.", "type_id": 1}
+```
+
+### `list_contact_tags`
+
+List the tags in use on RedmineUP CRM contacts, with their colors. Use it to discover valid names for the `tags` filter of `manage_contact(action="list")` and for `tag_list` on create/update.
+
+Requires `REDMINE_CRM_ENABLED=true`. Read-only. No parameters.
+
+**Returns:** a list of `{id, name, color}` ordered by name.
+
+### `manage_deal_category`
+
+List, create, rename, or delete RedmineUP CRM deal categories. Categories are defined per project and referenced by `category_id` on deals.
+
+Requires `REDMINE_DEALS_ENABLED=true`. Writes need the plugin's `manage_deals` permission, which enabling the flag advertises as an OAuth scope.
+
+**Parameters:**
+- `action` (string, required): `list`, `create`, `update`, `delete`
+- `project_id` (integer or string): required for `list` and `create`
+- `category_id` (integer): required for `update` and `delete`
+- `name` (string): required for `create` and `update`; at most 30 characters and unique within the project (the plugin answers 422 otherwise)
+- `reassign_to_id` (integer, optional): `delete` only. Category to move the deleted category's deals to. Without it the plugin leaves those deals uncategorised.
+
+**Returns:** `list` a list of `{id, name}`; `create` `{id, name, project_id}`; `update` `{success, category_id, updated_fields}`; `delete` `{success, category_id, message}`.
+
+**Plugin quirk:** deleting an unknown `category_id` makes the plugin answer 500 rather than 404, which the tool reports as a server error. `list_deal_statuses` also returns a project's categories, so a deal-creation flow needs only that one call.
+
+### `list_crm_queries`
+
+List saved RedmineUP CRM queries (the named filters users build in the contact and deal lists).
+
+Available with `REDMINE_CRM_ENABLED=true` (`object_type=contact`) or `REDMINE_DEALS_ENABLED=true` (`object_type=deal`). Read-only.
+
+**Parameters:**
+- `object_type` (string, required): `contact` or `deal`
+- `limit` (integer, optional): 1 to 100, default 25
+- `offset` (integer, optional): default 0
+
+**Returns:** a list of `{id, name, is_public, project_id}`; `project_id` is `null` for global queries. Only queries visible to the calling user are returned.
+
+### `add_deal_product`
+
+Add a product line to a RedmineUP CRM deal. The plugin recalculates the deal's `price` from its lines after each addition; read them back with `manage_deal(action="get", include="lines")`.
+
+Requires `REDMINE_DEALS_ENABLED=true` **and** `REDMINE_PRODUCTS_ENABLED=true`: the `PUT /deals/:id/add_product.json` endpoint is registered by the CRM plugin only when the RedmineUP Products plugin (2.0.2 or later) is installed. The tool is hidden unless both flags are set. Write-additive (`destructiveHint=false`).
+
+**Parameters:**
+- `deal_id` (integer, required)
+- `product_id` (integer): catalogue product to add; its description and price are used unless overridden. Optional when `description` is given, which creates a free-form line
+- `quantity` (number, optional): positive; the plugin defaults to 1
+- `price` (string or number, optional): unit price, sent as a string like `manage_deal`'s `price`
+- `description` (string, optional): line text; required without `product_id`
+- `tax`, `discount` (number, optional): percentages 0 to 100, checked client-side and by the plugin (422)
+
+**Returns:** `{success, deal_id, line}` with the line as sent, or `{"error": ...}`. An unknown `deal_id` makes the plugin answer 500 rather than 404.
+
+**Line shape** (from `manage_deal(get, include="lines")`): `{id, position, product {id, name} | null, description, quantity, tax, discount, price, total}`; `description` is wrapped in `<insecure-content>` tags.
 
 ## Documents (DMSF plugin)
 
@@ -2372,8 +3405,8 @@ Combined DMSF CRUD tool. **Action-dispatched** — pass `action="list"|"get"|"cr
 
 **Returns:**
 
-- `list`: list of node dicts. Each node has `id`, `type` (`file` / `folder` / `file-link` / `folder-link`), `filename`, `title`, `name`, `description`, `version`, `size`, `content_type`, `folder_id`, `project_id`, `author` (`{id, name}`), `created_on`, `updated_on`.
-- `get`: a single node dict with the same shape. Most metadata (`description`, `size`, `version`, `mime_type`, `user_id`, timestamps) is pulled from the latest entry of `dmsf_file_revisions[]` — see the design notes below.
+- `list`: list of node dicts. Each node has `id`, `type` (`file` / `folder` / `file-link` / `folder-link`), `filename`, `title`, `name`, `description`, `version`, `size`, `content_type`, `folder_id`, `project_id`, `author` (`{id, name}`), `custom_fields`, `created_on`, `updated_on`. DMSF's list endpoint renders only `id`, `title`, `type` and `filename` per node, so the other keys are empty or `null` on a list row (`custom_fields` is `null`, not `[]`); call `get` for a document's metadata.
+- `get`: a single node dict with the same shape. Most metadata (`description`, `size`, `version`, `mime_type`, `user_id`, timestamps, `custom_fields`) is pulled from the latest entry of `dmsf_file_revisions[]`, the one with the highest `id` (DMSF lists revisions newest first) — see the design notes below. `custom_fields` is `[]` when that revision has none, and `folder_id` is read from DMSF's `dmsf_folder_id`.
 - `create`: a **sparse** dict containing only `id` + `name` (plus a `note` pointing at `action="get"` for full metadata). DMSF's commit endpoint deliberately returns id + name only; call `get` if you need description/size/version/timestamps. Returns `{"success": True}` if the response is unexpectedly empty.
 - `update`: `{"success": True, "document_id": N, "updated_fields": [...], "note": "DMSF created a new revision; previous revisions remain accessible via the document's revision history."}`.
 - Any failure: `{"error": "..."}`.
@@ -2441,6 +3474,71 @@ manage_document(
 
 ---
 
+## Helpdesk (RedmineUP Helpdesk plugin)
+
+This section requires the **RedmineUP Helpdesk** plugin installed on the Redmine server. `send_helpdesk_email_reply` needs `REDMINE_HELPDESK_ENABLED=true`; `manage_helpdesk_ticket` needs `REDMINE_HELPDESK_TICKETS_ENABLED=true` and the RedmineUP CRM plugin as well.
+
+### `send_helpdesk_email_reply`
+
+Email a reply to the customer of a Helpdesk ticket. This is what the web UI's "Send Note" checkbox does. `update_redmine_issue(notes=...)` only adds an internal journal, which the customer never receives.
+
+This is a **write operation** and is blocked in read-only mode. The email cannot be recalled once sent.
+
+**Parameters:**
+- `issue_id` (integer, required): the Helpdesk ticket (issue) to reply on
+- `content` (string, required): the email body; must not be blank
+- `status_id` (integer, optional): status to set on the ticket after the reply is sent
+
+**Returns:** `{success, issue_id, journal_id, to_address, message_date, customer, status_id}`, where `journal_id` is the journal that records the reply on the ticket, `to_address` is the recipient, and `customer` is `{id, name}` (`name` wrapped in `<insecure-content>` tags) or `null`. On failure, `{"error": ...}`; an unknown `issue_id` comes back as a validation error (the plugin answers 422, not 404), and an issue with no Helpdesk customer attached comes back as "not a Helpdesk ticket". A 404 means the endpoint is missing, and the error says to check that the Helpdesk plugin is installed.
+
+**Example:**
+```python
+send_helpdesk_email_reply(
+    issue_id=1234,
+    content="Thanks for the report. The fix is deployed, please try again.",
+    status_id=4,
+)
+```
+
+**Notes:**
+- Calls `POST /helpdesk/email_note.json`. The plugin documents only the `.xml` form, but the JSON form accepts and returns the same fields.
+- Works only on a Helpdesk ticket, meaning an issue with a customer attached.
+- `customer` comes from the response's `contact` key (Helpdesk 4.3) or `customer` key (Helpdesk 4.2).
+- Under OAuth, the tool requires the `add_issue_notes` scope. The plugin's endpoint itself checks no project role or permission (per a reading of the Helpdesk 4.2.9 controller in [#301](https://github.com/jztan/redmine-mcp-server/issues/301)), so with an API key any authenticated Redmine user can send through it. `REDMINE_HELPDESK_ENABLED` and read-only mode are the server-side gates.
+
+### `manage_helpdesk_ticket`
+
+Read a Helpdesk ticket's own data, or move the ticket to another existing contact. `get_redmine_issue` does not return the Helpdesk fields, and `update_redmine_issue` cannot change the ticket's customer (a `customer_id` key is reported in `unverified_fields` and changes nothing).
+
+Requires `REDMINE_HELPDESK_TICKETS_ENABLED=true` and the Helpdesk and CRM plugins. `set_contact` is a **write operation** and is blocked in read-only mode; `get` is not.
+
+**Parameters:**
+- `action` (string, required): `get` or `set_contact`
+- `issue_id` (integer, required): the ticket's issue id
+- `contact_id` (integer): `set_contact` only; the contact to assign
+- `email` (string): `set_contact` only; an email address of the contact to assign, matched exactly and case-insensitively among the issue's project's contacts. Give exactly one of `contact_id` and `email`.
+
+**Returns:** `{issue_id, contact, from_address, to_address, cc_address, message_id, source, is_incoming, ticket_date, reaction_time, first_response_time, resolve_time, last_agent_response_at, last_customer_response_at, vote, vote_comment, content}`, where `contact` is `{id, name}`. `set_contact` adds `previous_contact` (`{id, name}`). If the change went through but the updated ticket cannot be read back, the result carries a `warning`, `contact` holds only the new id, and `previous_contact` is still reported. `contact.name`, `previous_contact.name`, `content`, `vote_comment` and the address and `message_id` fields are wrapped in `<insecure-content>` tags: the plugin copies the addresses and message id from inbound email headers. On failure, `{"error": ...}` naming the step that failed and what to do about it.
+
+**Example:**
+```python
+manage_helpdesk_ticket(action="get", issue_id=804)
+manage_helpdesk_ticket(action="set_contact", issue_id=804, email="bob@example.com")
+```
+
+**Notes:**
+- Both actions read `GET /issues/<id>.json` first. The plugin's own ticket lookup does not check issue visibility, so this keeps a caller from reading a private issue's description through the ticket.
+- `set_contact` never creates a contact and never converts a plain issue into a ticket, both of which the plugin's `PUT /helpdesk_tickets/<id>.json` does on its own. It refuses an issue that is not a ticket, and a contact that is unknown, not visible, not linked to the issue's project, or without an email address. The project rule matches the web UI's default; a deployment with the CRM setting `cross_project_contacts` on can link the contact with `manage_contact(action="assign_to_project")` first.
+- An `email` lookup searches the issue's project's contacts, up to 500 of them; a broader match is refused with a request for `contact_id`.
+- After the change, replies go to the contact's **primary** email, even when it was found by a secondary one.
+- Redmine keeps no journal entry for a contact change, so `previous_contact` is the only record of the old value.
+- If someone removes the ticket's Helpdesk record in the moment between the tool's check and its write, the write recreates the record. With the Helpdesk settings "assign contact user" and "create private tickets" both on, that also makes the issue private.
+- OAuth scopes: `get` needs `view_issues` and `view_helpdesk_tickets`; `set_contact` also needs `edit_helpdesk_tickets` and `view_contacts`. The flag advertises `view_helpdesk_tickets`, `view_contacts`, `view_private_contacts` and `edit_helpdesk_tickets` (the last unless read-only).
+
+**Acknowledgement:** RedmineUP provided evaluation copies of the Helpdesk PRO (4.3.1) and CRM PRO (4.5.0) plugins for verifying `send_helpdesk_email_reply` and `manage_helpdesk_ticket` against a real Pro instance on Redmine 6.1.1.
+
+---
+
 ## Meta
 
 ### `get_mcp_server_info`
@@ -2454,7 +3552,7 @@ Return the MCP server's version, enabled-feature flags, and the identity of the 
 - `read_only_mode` (boolean): whether `REDMINE_MCP_READ_ONLY` is enabled. When `True`, all write tools refuse with the standard read-only error.
 - `auth_mode` (string): `"oauth"` or `"legacy"`.
 - `current_user` (dict or null): `{id, login, name}` for the authenticated Redmine user behind the configured API key. `null` when the server cannot reach Redmine (check `/health` for connectivity status). Use this to confirm who `assigned_to_id="me"` resolves to, which matters when a shared or robot API key is in use.
-- `plugin_flags` (dict): which plugin-gated tool families are enabled. Keys: `agile`, `checklists`, `products`, `crm`, `dmsf`, `tags`. `True` means the corresponding `manage_*` / `get_*` tools are routable and will reach the underlying plugin endpoints (for `tags`, that `get_redmine_issue` returns a `tags` array); `False` means they will return a "feature disabled" error envelope (or, for `tags`, that the field is omitted).
+- `plugin_flags` (dict): which plugin-gated tool families are enabled. Keys: `agile`, `checklists`, `products`, `crm`, `deals`, `dmsf`, `helpdesk`, `helpdesk_tickets`, `tags`, plus one per family registered by an [extension](extensions.md). `True` means the family's tools are listed and routable and will reach the underlying plugin endpoints (for `tags`, that `get_redmine_issue` returns a `tags` array); `False` means they are hidden from `tools/list` (calling them by name returns "Unknown tool"), except for `agile` and `tags`, which only add fields to core tools and are never hidden (for `tags`, the field is simply omitted).
 
 The response intentionally excludes credentials, internal hostnames, file-system paths, and any other operator config that a caller doesn't need to know to choose its call shape. Only flags that change *call shape* are surfaced.
 

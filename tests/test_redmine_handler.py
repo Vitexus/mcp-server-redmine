@@ -9,7 +9,8 @@ import os
 import sys
 
 import pytest
-from unittest.mock import Mock, patch
+from redminelib.exceptions import ForbiddenError
+from unittest.mock import Mock, PropertyMock, patch
 
 # Add the src directory to the path so we can import our modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -83,6 +84,7 @@ class TestRedmineHandler:
         attachment.author = att_author
         attachment.created_on = datetime(2025, 1, 2, 11, 0, 0)
         mock_issue.attachments = [attachment]
+        mock_issue.raw.return_value = {"attachments": [attachment]}
 
         # Mock custom fields (e.g., Agile plugin "Size")
         custom_field = Mock()
@@ -925,6 +927,7 @@ class TestRedmineHandler:
         size_custom_field.possible_values = ["S", "M", "L"]
         project = Mock()
         project.issue_custom_fields = [size_custom_field]
+        project.raw.return_value = {"issue_custom_fields": project.issue_custom_fields}
         mock_redmine.project.get.return_value = project
 
         result = await update_redmine_issue(123, {"size": "S", "notes": "size set"})
@@ -960,6 +963,7 @@ class TestRedmineHandler:
         size_custom_field.possible_values = ["S", "M", "L"]
         project = Mock()
         project.issue_custom_fields = [size_custom_field]
+        project.raw.return_value = {"issue_custom_fields": project.issue_custom_fields}
         mock_redmine.project.get.return_value = project
 
         await update_redmine_issue(
@@ -1023,6 +1027,7 @@ class TestRedmineHandler:
         size_custom_field.possible_values = ["S", "M", "L"]
         project = Mock()
         project.issue_custom_fields = [size_custom_field]
+        project.raw.return_value = {"issue_custom_fields": project.issue_custom_fields}
         mock_redmine.project.get.return_value = project
 
         result = await update_redmine_issue(123, {"size": []})
@@ -1050,6 +1055,7 @@ class TestRedmineHandler:
         size_custom_field.possible_values = ["S", "M", "L"]
         project = Mock()
         project.issue_custom_fields = [size_custom_field]
+        project.raw.return_value = {"issue_custom_fields": project.issue_custom_fields}
         mock_redmine.project.get.return_value = project
 
         result = await update_redmine_issue(123, {"size": "XXL"})
@@ -1084,6 +1090,7 @@ class TestRedmineHandler:
 
         project = Mock()
         project.issue_custom_fields = [field_a, field_b]
+        project.raw.return_value = {"issue_custom_fields": project.issue_custom_fields}
         mock_redmine.project.get.return_value = project
 
         result = await update_redmine_issue(123, {"project category": "Bug"})
@@ -1165,6 +1172,10 @@ class TestRedmineHandler:
         journal.user = user
 
         mock_redmine_issue.journals = [journal]
+        mock_redmine_issue.raw.return_value = {
+            **mock_redmine_issue.raw.return_value,
+            "journals": [journal],
+        }
         return mock_redmine_issue
 
     @pytest.fixture
@@ -1380,6 +1391,7 @@ class TestHelperFunctionEdgeCases:
         mock_journal.details = []  # No field-change details either
         mock_journal.id = 1
         mock_issue.journals = [mock_journal]
+        mock_issue.raw.return_value = {"journals": [mock_journal]}
         result = _journals_to_list(mock_issue)
         assert result == []  # Filtered out (no information to surface)
 
@@ -1402,6 +1414,7 @@ class TestHelperFunctionEdgeCases:
             }
         ]
         mock_issue.journals = [mock_journal]
+        mock_issue.raw.return_value = {"journals": [mock_journal]}
         result = _journals_to_list(mock_issue)
         assert len(result) == 1
         assert result[0]["id"] == 34166
@@ -1438,6 +1451,7 @@ class TestHelperFunctionEdgeCases:
             }
         ]
         mock_issue.journals = [mock_journal]
+        mock_issue.raw.return_value = {"journals": [mock_journal]}
         result = _journals_to_list(mock_issue)
         assert len(result) == 1
         assert result[0]["details"][0]["property"] == "cf"
@@ -1455,6 +1469,7 @@ class TestHelperFunctionEdgeCases:
         mock_journal.details = []
         mock_journal.id = 1
         mock_issue.journals = [mock_journal]
+        mock_issue.raw.return_value = {"journals": [mock_journal]}
         result = _journals_to_list(mock_issue)
         # Whitespace is truthy, so it won't be filtered
         assert len(result) == 1
@@ -1689,8 +1704,8 @@ class TestSearchEntireRedmineValidation:
         # Should have called search with default allowed types
         mock_redmine.search.assert_called_once()
         call_args = mock_redmine.search.call_args
-        # Resources should be the defaults: ["issues", "wiki_pages"]
-        assert set(call_args[1]["resources"]) == {"issues", "wiki_pages"}
+        # Resources should be the defaults
+        assert set(call_args[1]["resources"]) == {"issues", "wiki_pages", "news"}
 
     @pytest.mark.asyncio
     @patch("redmine_mcp_server._client.redmine")
@@ -1728,19 +1743,19 @@ class TestSearchEntireRedmineValidation:
             search_entire_redmine,
         )  # Return results with an unknown type that's not in allowed_types
 
-        mock_news = Mock()
-        mock_news.id = 1
-        mock_news.title = "News Item"
+        mock_project = Mock()
+        mock_project.id = 1
+        mock_project.name = "Some Project"
 
         mock_redmine.search.return_value = {
-            "news": [mock_news],  # Not in allowed_types
+            # Redmine searches projects; this server does not offer them.
+            "projects": [mock_project],
             "issues": [],
         }
 
         result = await search_entire_redmine("test query")
 
-        # "news" should not be in results_by_type
-        assert "news" not in result["results_by_type"]
+        assert "projects" not in result["results_by_type"]
         assert result["total_count"] == 0
 
 
@@ -2052,6 +2067,7 @@ class TestGetRedmineIssueJournalPagination:
             j.user = Mock(id=1, name="Author")
             journals.append(j)
         issue.journals = journals
+        issue.raw.return_value = {"journals": journals, "attachments": []}
         return issue
 
     @pytest.mark.asyncio
@@ -2177,28 +2193,39 @@ class TestGetRedmineIssueIncludeFlags:
         issue.assigned_to = None
         issue.created_on = None
         issue.updated_on = None
-        issue.journals = []
-        issue.attachments = []
-        w1 = Mock(id=10)
-        w1.name = "Watcher One"
-        w2 = Mock(id=11)
-        w2.name = "Watcher Two"
-        issue.watchers = [w1, w2]
-        issue.relations = [
-            Mock(
-                id=5,
-                issue_id=123,
-                issue_to_id=456,
-                relation_type="relates",
-            )
-        ]
-        issue.children = [
-            Mock(
-                id=200,
-                subject="Child Issue",
-                tracker=Mock(id=1, name="Bug"),
-            )
-        ]
+        # Includes come from the payload, as Redmine renders them.
+        # python-redmine's issue.relations attribute does NOT read that
+        # payload -- it is a lazy relation that issues a separate
+        # GET /issues/{id}/relations.json, mapped to manage_issue_relations
+        # -- and the other include attributes re-fetch the issue when their
+        # key is missing. So serve them from raw() and make the relations
+        # attribute raise, so a regression to getattr fails here and not only
+        # against a real Redmine.
+        issue.raw.return_value = {
+            "journals": [],
+            "attachments": [],
+            "watchers": [
+                {"id": 10, "name": "Watcher One"},
+                {"id": 11, "name": "Watcher Two"},
+            ],
+            "relations": [
+                {
+                    "id": 5,
+                    "issue_id": 123,
+                    "issue_to_id": 456,
+                    "relation_type": "relates",
+                    "delay": None,
+                }
+            ],
+            "children": [
+                {
+                    "id": 200,
+                    "subject": "Child Issue",
+                    "tracker": {"id": 1, "name": "Bug"},
+                }
+            ],
+        }
+        type(issue).relations = PropertyMock(side_effect=ForbiddenError)
         return issue
 
     @pytest.mark.asyncio
@@ -2328,7 +2355,8 @@ class TestGetRedmineIssueIncludeFlags:
     async def test_watchers_missing_attribute(
         self, mock_redmine, mock_cleanup, mock_issue_with_extras
     ):
-        delattr(mock_issue_with_extras, "watchers")
+        # As Redmine renders it without view_issue_watchers: no key at all.
+        del mock_issue_with_extras.raw.return_value["watchers"]
         mock_redmine.issue.get.return_value = mock_issue_with_extras
         result = await get_redmine_issue(1, include_watchers=True)
         assert result["watchers"] == []

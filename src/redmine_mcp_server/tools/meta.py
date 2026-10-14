@@ -27,15 +27,8 @@ from typing import Any, Dict, Optional
 
 from .._annotations import READ_ONLY_ANNOTATIONS
 from .. import __version__
-from .._env import (
-    _is_agile_enabled,
-    _is_checklists_enabled,
-    _is_crm_enabled,
-    _is_dmsf_enabled,
-    _is_products_enabled,
-    _is_read_only_mode,
-    _is_tags_enabled,
-)
+from .._env import SERVER_INFO_PLUGIN_FLAGS, _is_read_only_mode
+from .._extension_registry import REGISTERED_EXTENSIONS
 from ..server import mcp
 
 logger = logging.getLogger("redmine_mcp_server")
@@ -49,8 +42,12 @@ async def _fetch_current_user_info() -> Optional[Dict[str, Any]]:
 
     Uses ``GET /users/current.json`` via async httpx — works on Redmine 3.x
     and later. ``/my/account.json`` is not reliably available on older
-    Redmine instances. redminelib's ``user.get('current')`` is not used
-    because it requires admin rights on some setups.
+    Redmine instances.
+
+    This duplicates ``get_current_user`` and has not been consolidated with
+    it; that is the only reason it is a separate path, not any permission
+    difference. The endpoint is not admin-gated -- see the
+    ``get_current_user`` note in ``oauth_scopes.py`` for why.
     """
     try:
         import httpx
@@ -69,7 +66,7 @@ async def _fetch_current_user_info() -> Optional[Dict[str, Any]]:
         else:
             return None
 
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with httpx.AsyncClient(timeout=5, **_client.httpx_ssl_kwargs()) as client:
             r = await client.get(url, headers=headers, auth=auth)
         if r.status_code != 200:
             return None
@@ -119,11 +116,16 @@ async def get_mcp_server_info() -> Dict[str, Any]:
           authenticated Redmine user. ``None`` if the server cannot reach
           Redmine (check ``/health`` for connectivity status).
         - ``plugin_flags`` (dict[str, bool]): which plugin-gated tool
-          families are enabled. Keys: ``agile``, ``checklists``,
-          ``products``, ``crm``, ``dmsf``. ``True`` means the
-          corresponding ``manage_*`` / ``get_*`` tools are routable
-          and will reach the underlying plugin endpoints; ``False``
-          means they will return a "feature disabled" error envelope.
+          families are enabled. Always ``agile``, ``checklists``,
+          ``products``, ``crm``, ``deals``, ``dmsf``, ``helpdesk``,
+          ``helpdesk_tickets``, ``tags``, in that order, and after them
+          one key per family this deployment added through
+          ``REDMINE_MCP_EXTENSIONS``, named after the family. The nine are
+          reserved, so each always carries its own flag.
+          ``True`` means the family's tools are listed and routable;
+          ``False`` means they are hidden from ``tools/list`` (``agile``
+          and ``tags`` only add fields to core tools and are never
+          hidden).
 
     The response intentionally excludes credentials, internal
     hostnames, file-system paths, and any other operator-config that
@@ -154,11 +156,10 @@ async def get_mcp_server_info() -> Dict[str, Any]:
         "auth_mode": (os.environ.get("REDMINE_AUTH_MODE") or "legacy").lower(),
         "current_user": await _fetch_current_user_info(),
         "plugin_flags": {
-            "agile": _is_agile_enabled(),
-            "checklists": _is_checklists_enabled(),
-            "products": _is_products_enabled(),
-            "crm": _is_crm_enabled(),
-            "dmsf": _is_dmsf_enabled(),
-            "tags": _is_tags_enabled(),
+            **{
+                family: is_enabled()
+                for family, is_enabled in SERVER_INFO_PLUGIN_FLAGS.items()
+            },
+            **{spec.family: spec.enabled() for spec in REGISTERED_EXTENSIONS},
         },
     }

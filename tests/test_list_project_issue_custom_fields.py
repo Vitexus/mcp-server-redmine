@@ -81,6 +81,7 @@ class TestListProjectIssueCustomFields:
         custom_field = create_mock_custom_field()
         project = Mock()
         project.issue_custom_fields = [custom_field]
+        project.raw.return_value = {"issue_custom_fields": project.issue_custom_fields}
         mock_redmine.project.get.return_value = project
 
         result = await list_project_issue_custom_fields(project_id=41)
@@ -98,7 +99,12 @@ class TestListProjectIssueCustomFields:
     async def test_list_project_issue_custom_fields_filters_by_tracker(
         self, mock_redmine
     ):
-        """Tracker filtering keeps matching and global (unrestricted) custom fields."""
+        """Tracker filtering keeps only fields bound to the given tracker.
+
+        A field with no bindings is not "global": Redmine computes an issue's
+        fields as ``project.all_issue_custom_fields & tracker.custom_fields``
+        (``app/models/issue.rb``), so an unbound field intersects to nothing.
+        """
         tracker_bug = Mock()
         tracker_bug.id = 5
         tracker_bug.name = "Bug"
@@ -113,16 +119,16 @@ class TestListProjectIssueCustomFields:
         for_feature = create_mock_custom_field(
             field_id=11, name="Feature-only", trackers=[tracker_feature]
         )
-        global_field = create_mock_custom_field(field_id=12, name="Global", trackers=[])
+        unbound = create_mock_custom_field(field_id=12, name="Unbound", trackers=[])
 
         project = Mock()
-        project.issue_custom_fields = [for_bug, for_feature, global_field]
+        project.issue_custom_fields = [for_bug, for_feature, unbound]
+        project.raw.return_value = {"issue_custom_fields": project.issue_custom_fields}
         mock_redmine.project.get.return_value = project
 
         result = await list_project_issue_custom_fields(project_id=41, tracker_id=5)
 
-        assert len(result) == 2
-        assert {field["id"] for field in result} == {10, 12}
+        assert {field["id"] for field in result} == {10}
 
     @pytest.mark.asyncio
     async def test_list_project_issue_custom_fields_accepts_string_tracker_id(
@@ -136,6 +142,7 @@ class TestListProjectIssueCustomFields:
         field = create_mock_custom_field(field_id=10, trackers=[tracker_bug])
         project = Mock()
         project.issue_custom_fields = [field]
+        project.raw.return_value = {"issue_custom_fields": project.issue_custom_fields}
         mock_redmine.project.get.return_value = project
 
         result = await list_project_issue_custom_fields(

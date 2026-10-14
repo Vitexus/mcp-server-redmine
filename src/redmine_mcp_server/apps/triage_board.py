@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional, Union
 
 from fastmcp.apps.config import AppConfig, ResourceCSP
 
-from .._annotations import READ_ONLY_ANNOTATIONS
 from .._env import _is_read_only_mode
 from ..server import mcp
 from ..tools.enumeration import list_redmine_issue_statuses
@@ -28,6 +27,18 @@ _TRIAGE_BOARD_HTML = (
     .joinpath("triage_board.html")
     .read_text(encoding="utf-8")
 )
+
+
+def _app_config(**extra: Any) -> AppConfig:
+    """AppConfig shared by the UI resource and its tool (#249).
+
+    The view is self-contained, so the CSP declares no external origins;
+    the lists are explicit (not omitted) so hosts that check for a
+    declared CSP, such as ChatGPT's inspector, see one. ``domain`` is left
+    unset on purpose: its format is host-specific and the host falls back
+    to its own sandbox origin.
+    """
+    return AppConfig(csp=ResourceCSP(connect_domains=[], resource_domains=[]), **extra)
 
 
 def _name(value: Any) -> Optional[str]:
@@ -99,21 +110,15 @@ async def _build_board_payload(
     }
 
 
-@mcp.resource(_UI_RESOURCE_URI, mime_type="text/html;profile=mcp-app")
+@mcp.resource(
+    _UI_RESOURCE_URI, mime_type="text/html;profile=mcp-app", app=_app_config()
+)
 def triage_board_ui() -> str:
     """Serve the self-contained triage-board HTML view."""
     return _TRIAGE_BOARD_HTML
 
 
-@mcp.tool(
-    title="Show Triage Board",
-    annotations=READ_ONLY_ANNOTATIONS,
-    app=AppConfig(
-        resource_uri=_UI_RESOURCE_URI,
-        visibility=["model"],
-        csp=ResourceCSP(),
-    )
-)
+@mcp.tool(app=_app_config(resource_uri=_UI_RESOURCE_URI, visibility=["model"]))
 async def show_triage_board(
     project_id: Union[int, str],
     filters: Optional[Dict[str, Any]] = None,
@@ -145,11 +150,7 @@ async def show_triage_board(
     return await _build_board_payload(project_id, filters)
 
 
-@mcp.tool(
-    title="Get Triage Board Data",
-    annotations=READ_ONLY_ANNOTATIONS,
-    app=AppConfig(visibility=["app"]),
-)
+@mcp.tool(app=AppConfig(visibility=["app"]))
 async def get_triage_board_data(
     project_id: Union[int, str],
     filters: Optional[Dict[str, Any]] = None,
@@ -157,6 +158,16 @@ async def get_triage_board_data(
     """Backend data source for the triage board's Refresh button.
 
     Returns the same payload as ``show_triage_board`` without a UI
-    resource; the board's iframe calls this over ``tools/call``.
+    resource; the board's iframe calls this over ``tools/call``. Pass the
+    same arguments the board was opened with, so a refresh redraws the same
+    view. Read-only.
+
+    Args:
+        project_id: The project whose board is being refreshed, as a
+            numeric ID or string identifier (e.g. ``1`` or
+            ``"testing-project1"``).
+        filters: Optional extra Redmine filter dict, the same shape
+            ``list_redmine_issues`` accepts (e.g. ``{"assigned_to_id":
+            "me"}`` or ``{"tracker_id": 1}``).
     """
     return await _build_board_payload(project_id, filters)

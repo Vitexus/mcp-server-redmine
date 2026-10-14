@@ -62,17 +62,19 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import Field
 
-from .._annotations import MANAGE_ANNOTATIONS
 from .._client import _get_redmine_client
 from .._decorators import ActionMode, action_dispatch
 from .._env import _is_dmsf_enabled
 from .._errors import _handle_redmine_error
+from .._offload import offloaded
 from .._serialization import (
     _REDMINE_API_PAGE_CAP,
+    _custom_fields_to_list,
     _safe_isoformat,
     wrap_insecure_content,
 )
 from .._validation import _is_positive_int, _is_valid_project_id
+from .._plugin_visibility import plugin_tag
 from ..server import mcp
 
 _DMSF_DISABLED_ERROR = {
@@ -119,6 +121,13 @@ def _document_to_dict(node: Dict[str, Any]) -> Dict[str, Any]:
     This serializer merges both shapes into one stable representation, falling
     back to the latest revision when a field is missing at the top level.
 
+    The single shape renders the parent folder as ``dmsf_folder_id``
+    (``dmsf_files/show.api.rsb``), and custom field values per revision, as
+    ``custom_fields`` on each ``dmsf_file_revisions`` entry. The list shape
+    renders no custom field values at all, so ``custom_fields`` is ``None``
+    on a list row -- unknown, rather than none -- and ``[]`` on a single
+    document whose latest revision has none.
+
     Per the wrap policy in #109: free-text fields (``description``) are
     wrapped in ``<insecure-content>`` boundary tags; structured-metadata
     fields (``filename``, ``name``, ``title``, ``author.name``) are
@@ -128,16 +137,17 @@ def _document_to_dict(node: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(node, dict):
         return {}
 
-    # The latest revision is the highest-id entry; DMSF returns them in
-    # ascending order so the last element is the current one. Fall back to
-    # max-by-id when the order can't be assumed.
+    # The latest revision is the highest-id entry. DMSF orders the
+    # association newest first (``has_many :dmsf_file_revisions, -> {
+    # order(created_at: :desc, id: :desc) }`` in ``dmsf_file.rb``), so the
+    # last element is the oldest; picking by id does not depend on the order.
     revisions = node.get("dmsf_file_revisions")
-    if isinstance(revisions, list) and revisions:
-        latest = revisions[-1]
-        if not isinstance(latest, dict):
-            latest = {}
-    else:
-        latest = {}
+    entries = (
+        [r for r in revisions if isinstance(r, dict)]
+        if isinstance(revisions, list)
+        else []
+    )
+    latest = max(entries, key=lambda r: r.get("id") or 0, default={})
 
     # Author can arrive as a nested dict (list endpoint) or as a bare user_id
     # on the latest revision (single endpoint). Normalize to either a
@@ -173,9 +183,10 @@ def _document_to_dict(node: Dict[str, Any]) -> Dict[str, Any]:
             node.get("size") if node.get("size") is not None else latest.get("size")
         ),
         "content_type": node.get("content_type") or latest.get("mime_type"),
-        "folder_id": node.get("folder_id"),
+        "folder_id": node.get("dmsf_folder_id") or node.get("folder_id"),
         "project_id": node.get("project_id"),
         "author": author,
+        "custom_fields": _custom_fields_to_list(latest) if latest else None,
         "created_on": _safe_isoformat(
             node.get("created_on") or latest.get("created_at")
         ),
@@ -213,7 +224,8 @@ def _extract_dmsf_single_doc(payload: Any) -> Dict[str, Any]:
     return {}
 
 
-async def _list_documents_action(
+@offloaded
+def _list_documents_action(
     project_id: Optional[Union[str, int]] = None,
     folder_id: Optional[int] = None,
     limit: int = 100,
@@ -269,7 +281,8 @@ async def _list_documents_action(
         )
 
 
-async def _get_document_action(
+@offloaded
+def _get_document_action(
     document_id: Optional[int] = None,
     **_: Any,
 ) -> Dict[str, Any]:
@@ -337,7 +350,8 @@ def _split_dmsf_version(version: str) -> Union[Dict[str, str], Dict[str, str]]:
     }
 
 
-async def _create_document_action(
+@offloaded
+def _create_document_action(
     project_id: Optional[Union[str, int]] = None,
     filename: Optional[str] = None,
     content_base64: Optional[str] = None,
@@ -464,7 +478,8 @@ def _fetch_current_dmsf_doc(document_id: int) -> Dict[str, Any]:
     return _extract_dmsf_single_doc(payload)
 
 
-async def _update_document_action(
+@offloaded
+def _update_document_action(
     document_id: Optional[int] = None,
     fields: Optional[Dict[str, Any]] = None,
     **_: Any,
@@ -550,10 +565,7 @@ async def _manage_document_dispatch(action: str, **kwargs: Any) -> Any:
     }
 
 
-@mcp.tool(
-    title="Manage Document",
-    annotations=MANAGE_ANNOTATIONS,
-)
+@mcp.tool(tags={plugin_tag("dmsf")})
 async def manage_document(
     action: Literal["list", "get", "create", "update"],
     project_id: Optional[Union[str, int]] = None,

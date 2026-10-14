@@ -1,4 +1,4 @@
-"""FastMCP v3 native auth provider factory for the Redmine MCP server.
+"""FastMCP native auth provider factory for the Redmine MCP server.
 
 Builds a RemoteAuthProvider that:
   - Validates opaque OAuth tokens via Doorkeeper RFC 7662 introspection
@@ -6,7 +6,9 @@ Builds a RemoteAuthProvider that:
   - Mounts RFC 9728 protected-resource metadata at
     /.well-known/oauth-protected-resource/mcp.
   - Advertises scopes_supported from oauth_scopes.configured_advertised_scopes()
-    (filtered by REDMINE_MCP_READ_ONLY and REDMINE_MCP_SCOPES).
+    (filtered by REDMINE_MCP_READ_ONLY and REDMINE_MCP_SCOPES), refreshed
+    through update_scopes_supported() once the extension modules named by
+    REDMINE_MCP_EXTENSIONS have registered the scopes they add.
 
 The MCP server's introspection client_id/secret are read from
 REDMINE_INTROSPECT_CLIENT_ID / REDMINE_INTROSPECT_CLIENT_SECRET. The
@@ -30,6 +32,7 @@ import logging
 import os
 from urllib.parse import urlparse
 
+from ._client import httpx_ssl_kwargs
 from ._env import require_introspection_credentials, _oauth_discovery_as
 from .oauth_scopes import configured_advertised_scopes
 
@@ -73,6 +76,24 @@ class RedmineAuthProvider(RemoteAuthProvider):
             resource_name="Redmine MCP Server",
         )
 
+    def update_scopes_supported(self, scopes: list[str]) -> None:
+        """Replace the scope list both discovery documents advertise.
+
+        The constructor snapshots ``configured_advertised_scopes()`` at the
+        moment ``server.py`` builds the provider, which is before
+        ``main.py`` has imported the modules ``REDMINE_MCP_EXTENSIONS``
+        names. An extension registered after that widens the advertised
+        list, and without this the served documents would keep the narrower
+        snapshot. FastMCP's ``OAuthProxy`` has
+        ``update_default_scopes`` for the same reason; this is the
+        ``RemoteAuthProvider`` shape of it.
+
+        Safe to call up to the point the HTTP app is built: both metadata
+        documents read :attr:`scopes_supported` when their routes are
+        created, which is what ``get_routes()`` does.
+        """
+        self._scopes_supported = list(scopes)
+
     def redmine_endpoint(self, path: str) -> AnyHttpUrl:
         """Build a Redmine OAuth endpoint URL from the configured Redmine URL."""
         return AnyHttpUrl(
@@ -80,7 +101,13 @@ class RedmineAuthProvider(RemoteAuthProvider):
         )
 
     async def oauth_authorization_server(self, request: Request):
-        """RFC 8414 authorization-server metadata for Redmine Doorkeeper."""
+        """RFC 8414 authorization-server metadata for Redmine Doorkeeper.
+
+        Reads the ``scopes_supported`` property rather than the backing
+        attribute so this document and the protected-resource document --
+        which the base class builds from the same property -- cannot drift
+        apart once :meth:`update_scopes_supported` has replaced the list.
+        """
         metadata = OAuthMetadata(
             issuer=self.issuer,
             authorization_endpoint=self.redmine_endpoint("/oauth/authorize"),
@@ -96,7 +123,7 @@ class RedmineAuthProvider(RemoteAuthProvider):
                 "client_secret_post",
                 "client_secret_basic",
             ],
-            scopes_supported=self._scopes_supported,
+            scopes_supported=self.scopes_supported,
         )
         return await MetadataHandler(metadata).handle(request)
 
@@ -132,7 +159,7 @@ class RedmineAuthProvider(RemoteAuthProvider):
                 },
             )
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(**httpx_ssl_kwargs()) as client:
             try:
                 response = await client.post(
                     str(self.redmine_endpoint("/oauth/revoke")),

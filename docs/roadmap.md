@@ -4,8 +4,8 @@
 
 - **Current Version:** v2.9.0 (released 2026-08-01)
 - **MCP Registry Status:** Published
-- **Test Suite:** 1533 unit tests + 87 integration tests. Integration tests gate on environment: a sandbox Redmine, plugin flags (`REDMINE_AGILE_ENABLED` etc.), and the destructive OAuth test behind `RUN_DESTRUCTIVE_TESTS=1`. Tests that can't run in the current environment skip cleanly with a clear reason. Run them locally with `python tests/run_tests.py --all` or `--integration`.
-- **Tools:** 45 core + 6 plugin-gated + 1 admin-gated (maximum 52 with all flags enabled). The core count includes the two `triage-board` tools (`show_triage_board`, plus the app-only `get_triage_board_data` which is registered but hidden from the model's tool list) and the two `project-dashboard` tools (`show_project_dashboard`, plus the app-only `get_project_dashboard_data`). Note: the 6 plugin tools are always registered and listed; their flag is enforced at call time (a disabled call returns an error), so disabling a plugin does not hide its tools. Only the 1 admin tool is conditionally registered (hidden unless `REDMINE_MCP_EXPOSE_ADMIN_TOOLS=true`).
+- **Test Suite:** 2200 unit tests + 111 integration tests. Integration tests gate on environment: a sandbox Redmine, plugin flags (`REDMINE_AGILE_ENABLED` etc.), and the destructive OAuth test behind `RUN_DESTRUCTIVE_TESTS=1`. Tests that can't run in the current environment skip cleanly with a clear reason. Run them locally with `python tests/run_tests.py --all` or `--integration`.
+- **Tools:** 53 core + 15 plugin-gated + 1 admin-gated (maximum 69 with all flags enabled). The core count includes the two `triage-board` tools (`show_triage_board`, plus the app-only `get_triage_board_data` which is registered but hidden from the model's tool list) the two `project-dashboard` tools (`show_project_dashboard`, plus the app-only `get_project_dashboard_data`), and the two `project-timeline` tools (`show_project_timeline`, plus the app-only `get_project_timeline_data`). Plugin tools are registered with a family tag and hidden from `tools/list` unless their `REDMINE_*_ENABLED` flag is set (their call-time guard also stays); the admin tool is registered only when `REDMINE_MCP_EXPOSE_ADMIN_TOOLS=true`.
 
 ---
 
@@ -13,7 +13,7 @@
 
 The MCP spec [shipped on 2026-07-28](https://blog.modelcontextprotocol.io/posts/2026-07-28/) as scheduled: stateless protocol core (the `initialize` handshake and `Mcp-Session-Id` header are gone; protocol version, client identity, and capabilities travel in per-request `_meta`), the six OAuth/OIDC hardening SEPs, cacheable list results, and a formal extensions framework. Protocol-level work remains gated on FastMCP shipping stable support for the new spec; the goal is a single coordinated v3.0 release rather than two breaking cutovers.
 
-**Gate status (2026-08-01):** opening, but not open. FastMCP released [v4.0.0b1](https://gofastmcp.com/changelog) on 2026-07-28, explicitly targeting the new spec: sessionless 2026-07-28 protocol with dual-serving of handshake-era clients from one deployment, stateless session state, the authorization SEPs (identity assertion per SEP-990, scope step-up per SEP-2350), and background tasks via the `io.modelcontextprotocol/tasks` extension (SEP-2663). It is still a beta; this project pins `fastmcp>=3.0.0,<4` and runs v3.4.5, which carries the Apps Phase 1 support (from v3.2.0) relied on by the Interactive UI (MCP Apps) track below (the `triage-board` slice shipped in v2.6.0, the `project-dashboard` view in v2.7.0). The v3.0 work starts when FastMCP 4 reaches a stable release worth migrating to.
+**Gate status (2026-09-05):** open. FastMCP 4.0.0 shipped on 2026-08-31 and this project moved to `fastmcp>=4.0.1,<5` (MCP Python SDK 2.x) in #258, so the dependency gate for the v3.0 work below is cleared. The migration itself was mechanical (snake_case `ToolAnnotations` fields, `ToolResult` import path); none of the protocol-level items below are adopted yet, and the Interactive UI (MCP Apps) track keeps working on 4.x (the `triage-board` slice shipped in v2.6.0, the `project-dashboard` view in v2.7.0).
 
 **v3.0 scope (target: Q3 2026, gated on FastMCP):**
 
@@ -48,7 +48,8 @@ Committed direction (2026-06-27): become a reference adopter of the official [MC
 - [x] Interactive write-back: drag-to-reassign issue status via `update_redmine_issue` (optimistic move, reverts on rejection; disabled in read-only mode). Shipped in v2.6.0.
 - [ ] Drive traffic to [#168](https://github.com/jztan/redmine-mcp-server/discussions/168) via the visibility push to prioritize later views
 - [x] Project dashboard view (open/closed, overdue, due-this-week, by-priority, recent activity; click any figure to drill into the matching issue list in-panel, Refresh re-fetches via the app-callable `get_project_dashboard_data`; read-only). Shipped in v2.7.0.
-- [ ] Additional views prioritized by the #168 signal (Gantt/timeline, time-sheet, burndown)
+- [x] Gantt / timeline view (issue bars from start and due dates grouped by version, milestone diamonds, a Today line, and a Done section; Refresh re-fetches via the app-callable `get_project_timeline_data`; read-only).
+- [ ] Additional views prioritized by the #168 signal (time-sheet, burndown)
 
 > **Client note:** MCP hosts cache the `ui://` resource. After changing the board HTML, a server restart alone is not enough for an already-connected client (Claude Desktop) to pick it up: fully quit and reopen the client to refetch the resource.
 

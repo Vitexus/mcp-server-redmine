@@ -30,7 +30,7 @@ async def test_user_id_param_has_me_literal_in_schema(tool_name, param):
     async with Client(_server.mcp) as client:
         listed = {t.name: t for t in await client.list_tools()}
 
-    schema = listed[tool_name].inputSchema or {}
+    schema = listed[tool_name].input_schema or {}
     prop = schema.get("properties", {}).get(param)
     assert prop is not None, f"{tool_name}.{param} missing from schema"
 
@@ -72,7 +72,9 @@ async def test_invalid_string_rejected_at_boundary(tool_name, param):
     """Verify the runtime boundary actually rejects garbage strings
     with the INVALID_ARGUMENTS envelope from #108."""
     async with Client(_server.mcp) as client:
-        result = await client.call_tool(tool_name, {param: "notmeortheid"})
+        result = await client.call_tool(
+            tool_name, {param: "notmeortheid"}, raise_on_error=False
+        )
 
     payload = result.structured_content
     if payload and "result" in payload:

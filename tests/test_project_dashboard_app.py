@@ -227,6 +227,37 @@ async def test_build_payload_truncated_flag():
 
 
 @pytest.mark.asyncio
+async def test_open_fetch_requests_project_field_for_name_resolution():
+    """The open-issues fetch must ask Redmine for the ``project`` field.
+
+    ``_project_name`` resolves the header label from ``issue["project"]`` and
+    falls back to ``str(project_id)`` when no issue carries it. Since
+    ``list_redmine_issues`` returns only the fields it is asked for, leaving
+    ``project`` out of the request makes that fallback fire on every render,
+    so the dashboard header shows the raw id instead of the project name.
+
+    Asserting on the payload is not enough: a mock is free to return a
+    ``project`` key that the real call would never send, which is how this
+    regressed without a failing test.
+    """
+    side = [_open_resp([], total=0), _open_resp([], total=0), []]
+    list_mock = AsyncMock(side_effect=side)
+    with (
+        patch.object(
+            pd, "list_redmine_issue_statuses", AsyncMock(return_value=_STATUSES)
+        ),
+        patch.object(
+            pd, "list_redmine_issue_priorities", AsyncMock(return_value=_PRIORITIES)
+        ),
+        patch.object(pd, "list_redmine_issues", list_mock),
+        patch.object(pd, "_open_created_this_week", AsyncMock(return_value=0)),
+    ):
+        await pd._build_dashboard_payload(9)
+
+    assert "project" in list_mock.call_args_list[0].kwargs["fields"]
+
+
+@pytest.mark.asyncio
 async def test_build_payload_passes_through_statuses_error():
     ps, pp, pl, pd_delta = _patch_calls({"error": "boom"}, _PRIORITIES, [])
     with ps, pp, pl, pd_delta:
@@ -331,8 +362,12 @@ def test_dashboard_html_is_self_contained():
 
 
 # Importing the package registers the resource + tools on the shared mcp.
+from fastmcp import Client  # noqa: E402
+
 from redmine_mcp_server import apps  # noqa: E402,F401
 from redmine_mcp_server.server import mcp  # noqa: E402
+
+_EMPTY_CSP = {"connectDomains": [], "resourceDomains": []}
 
 
 @pytest.mark.asyncio
@@ -349,7 +384,31 @@ async def test_show_project_dashboard_meta_points_at_ui():
     ui = tool.meta["ui"]
     assert ui["resourceUri"] == "ui://redmine/project-dashboard.html"
     assert ui["visibility"] == ["model"]
-    assert ui.get("csp", {}) == {}
+    # Explicit empty allow-lists: the view is self-contained (#249).
+    assert ui["csp"] == _EMPTY_CSP
+
+
+@pytest.mark.asyncio
+async def test_dashboard_ui_resource_listing_declares_csp():
+    # ChatGPT reads the CSP from the template resource, not the tool (#249).
+    async with Client(mcp) as client:
+        entry = next(
+            r
+            for r in await client.list_resources()
+            if str(r.uri) == "ui://redmine/project-dashboard.html"
+        )
+    ui = entry.meta["ui"]
+    assert ui["csp"] == _EMPTY_CSP
+    assert "domain" not in ui  # host-specific format; left to the host
+
+
+@pytest.mark.asyncio
+async def test_dashboard_ui_resource_content_declares_csp():
+    async with Client(mcp) as client:
+        (content,) = await client.read_resource("ui://redmine/project-dashboard.html")
+    ui = content.meta["ui"]
+    assert ui["csp"] == _EMPTY_CSP
+    assert "domain" not in ui
 
 
 @pytest.mark.asyncio

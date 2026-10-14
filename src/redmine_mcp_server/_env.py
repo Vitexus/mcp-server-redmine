@@ -1,6 +1,7 @@
 """Environment-variable accessor helpers."""
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -43,9 +44,97 @@ def _is_crm_enabled() -> bool:
     return _is_true_env("REDMINE_CRM_ENABLED", "false")
 
 
+def _is_deals_enabled() -> bool:
+    """Check if RedmineUP CRM *deals* support is enabled.
+
+    Separate from :func:`_is_crm_enabled` even though deals ship inside the
+    same plugin, because they are absent from the CRM plugin's Light
+    edition: it declares no ``project_module :deals`` and therefore none of
+    the ``*_deals`` permissions. Redmine builds its OAuth scope list from
+    ``Redmine::AccessControl.permissions`` and applies
+    ``enforce_configured_scopes``, so advertising a deal scope on a Light
+    install is not merely useless -- the OAuth application cannot hold the
+    scope, and a client requesting it fails consent with ``invalid_scope``,
+    which would break contacts too. One flag per plugin would therefore
+    regress a working Light deployment on upgrade.
+    """
+    return _is_true_env("REDMINE_DEALS_ENABLED", "false")
+
+
+def _crm_edition() -> str:
+    """Which build of the RedmineUP CRM plugin this Redmine runs.
+
+    ``light`` (the default) or ``pro``. The plugin ships two builds whose
+    ``ContactQuery`` differs: the Pro build registers 22 contact query filters,
+    the Light build registers ``tags`` and nothing else. Redmine drops an
+    unregistered filter parameter without complaining --
+    ``Query#build_from_params`` only walks ``available_filters``, and
+    ``add_short_filter`` returns early on anything outside it -- so forwarding a
+    filter the build does not register answers ``200`` with the whole
+    collection, which a caller cannot tell from a filter that matched
+    everything.
+
+    The build cannot be detected: Redmine exposes plugin versions only through
+    ``admin/plugins``, which is HTML and admin-only. Hence a setting, and it
+    defaults to the build that registers less, so an unconfigured deployment
+    refuses a filter it may not be able to apply rather than answering wrongly.
+    """
+    value = os.getenv("REDMINE_CRM_EDITION", "light").strip().lower()
+    if value not in {"light", "pro"}:
+        raise RuntimeError(
+            f"REDMINE_CRM_EDITION must be 'light' or 'pro', got '{value}'."
+        )
+    return value
+
+
 def _is_dmsf_enabled() -> bool:
     """Check if DMSF (document management) plugin support is enabled."""
     return _is_true_env("REDMINE_DMSF_ENABLED", "false")
+
+
+def _is_helpdesk_enabled() -> bool:
+    """Check if RedmineUP Helpdesk plugin support is enabled."""
+    return _is_true_env("REDMINE_HELPDESK_ENABLED", "false")
+
+
+def _is_helpdesk_tickets_enabled() -> bool:
+    """Check if RedmineUP Helpdesk *ticket* support is enabled (#378).
+
+    Separate from :func:`_is_helpdesk_enabled`, which gates only
+    ``send_helpdesk_email_reply``. Turning this on also advertises the
+    Helpdesk ticket OAuth scopes, and a Redmine OAuth application that does
+    not grant an advertised scope fails consent for the whole list, so it
+    has to be an opt-in of its own rather than a change under the older
+    flag.
+    """
+    return _is_true_env("REDMINE_HELPDESK_TICKETS_ENABLED", "false")
+
+
+# The built-in half of ``get_mcp_server_info``'s ``plugin_flags``: flag name
+# -> the accessor whose answer that key carries, in the order the response
+# lists them. Two things read it. The tool builds those keys from here
+# instead of writing the calls out by hand, so the response and this table
+# cannot drift. And ``extensions.register_extension`` refuses a family named
+# after one of these keys, because the registered families are merged into
+# the same dict and one of them would replace the built-in entry, leaving a
+# client that reads the key to decide whether the built-in support is on
+# with the extension's flag instead.
+#
+# Wider than ``_plugin_visibility.PLUGIN_FLAGS``, which holds only the
+# families whose tools are hidden from ``tools/list``: ``agile`` and ``tags``
+# add fields to core tools rather than tools of their own, so they are
+# reported here and have nothing to hide.
+SERVER_INFO_PLUGIN_FLAGS: dict[str, Callable[[], bool]] = {
+    "agile": _is_agile_enabled,
+    "checklists": _is_checklists_enabled,
+    "products": _is_products_enabled,
+    "crm": _is_crm_enabled,
+    "deals": _is_deals_enabled,
+    "dmsf": _is_dmsf_enabled,
+    "helpdesk": _is_helpdesk_enabled,
+    "helpdesk_tickets": _is_helpdesk_tickets_enabled,
+    "tags": _is_tags_enabled,
+}
 
 
 def _is_scope_enforcement_enabled() -> bool:
@@ -88,12 +177,85 @@ def _admin_tools_enabled() -> bool:
     return _is_true_env("REDMINE_MCP_EXPOSE_ADMIN_TOOLS", "false")
 
 
+def get_allowed_tools() -> set[str] | None:
+    """Tool names an operator allow-lists, or ``None`` when unrestricted.
+
+    Reads ``REDMINE_MCP_ALLOW_TOOLS`` (comma-separated), falling back to
+    ``REDMINE_MCP_ALLOW_TOOLS_FILE`` (one name per line, ``#`` starts a
+    comment) -- the same env-var-wins-over-file precedence as
+    :func:`get_secret`, and branching on truthiness for the same reason.
+    ``docker-compose`` renders an unset ``${VAR}`` as the empty string, so an
+    empty variable has to mean "not set" or it would shadow a perfectly good
+    file.
+
+    Returns ``None`` when neither carries anything, so callers can tell "no
+    allow list configured" from "configured but empty". A variable holding
+    only separators comes back as an empty set: that is not an unset value but
+    a garbled one, and the caller rejects it rather than guessing.
+    """
+    raw = os.getenv("REDMINE_MCP_ALLOW_TOOLS")
+    if raw:
+        return {entry.strip() for entry in raw.split(",") if entry.strip()}
+
+    file_name = os.getenv("REDMINE_MCP_ALLOW_TOOLS_FILE")
+    if not file_name:
+        return None
+    try:
+        raw_lines = Path(file_name).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(
+            "Could not read tool allow list from "
+            f"REDMINE_MCP_ALLOW_TOOLS_FILE ({file_name}): {exc}"
+        ) from exc
+    entries = [line.split("#", 1)[0] for line in raw_lines]
+    return {entry.strip() for entry in entries if entry.strip()}
+
+
+def get_extension_modules() -> list[str]:
+    """Python modules to import at startup so they can register tools.
+
+    ``REDMINE_MCP_EXTENSIONS`` names them, comma- or whitespace-separated
+    (the shape :func:`get_allowed_client_redirect_uris` already uses), and
+    unset or blank means none, which is every stock deployment. Order is
+    preserved and duplicates are left in: importing a module twice is a
+    no-op to Python, so removing them would only hide a copy-paste mistake
+    in the variable.
+
+    See :mod:`.extensions` for what an extension module does once imported.
+    """
+    raw = os.getenv("REDMINE_MCP_EXTENSIONS", "")
+    return [name for name in raw.replace(",", " ").split() if name]
+
+
 def _get_int_env(var_name: str, default: int) -> int:
     """Parse an integer environment variable, falling back to default."""
     try:
         return int(os.getenv(var_name, str(default)))
     except (ValueError, TypeError):
         return default
+
+
+def get_redmine_timeout() -> tuple[float, float] | None:
+    """Return the ``(connect, read)`` timeout for Redmine HTTP calls.
+
+    ``REDMINE_TIMEOUT`` is a single seconds value (default 30). It is applied
+    as a connect timeout of at most 10s plus a read timeout of the full value,
+    which is the shape ``requests`` expects.
+
+    Returns ``None`` when set to 0 or less, which restores the pre-#214
+    behavior of waiting forever. That escape hatch exists for genuinely slow
+    Redmine instances; it also reintroduces the hang, so it is not a default.
+
+    Two properties of the requests timeout are worth knowing when tuning it:
+    the read timeout is the gap between bytes, not a cap on total transfer
+    time, so it does not limit large attachment downloads; and the connect
+    timeout applies per IP address, so an unresponsive dual-stack host can
+    take twice the connect budget before failing.
+    """
+    seconds = _get_int_env("REDMINE_TIMEOUT", 30)
+    if seconds <= 0:
+        return None
+    return (min(10.0, float(seconds)), float(seconds))
 
 
 def _get_upload_file_roots() -> list[str]:
@@ -205,6 +367,43 @@ def require_introspection_credentials() -> tuple[str, str]:
 def get_health_introspection_ttl_seconds() -> int:
     """How long /health caches the Doorkeeper introspection probe result."""
     return _get_int_env("HEALTH_INTROSPECTION_TTL_SECONDS", 30)
+
+
+def get_oauth_proxy_access_token_expiry_seconds() -> int | None:
+    """Lifetime of the access token OAuthProxy issues to MCP clients.
+
+    ``REDMINE_MCP_ACCESS_TOKEN_EXPIRY_SECONDS``, passed to FastMCP's
+    ``OAuthProxy`` as ``fastmcp_access_token_expiry_seconds``. Unset, blank or
+    ``0`` returns ``None``, which keeps FastMCP's default of mirroring
+    Doorkeeper's ``expires_in`` (2 hours on stock Redmine).
+
+    A longer lifetime cuts how often clients call ``/token`` to refresh. That
+    matters because OAuthProxy rotates the refresh token on every refresh and
+    rejects the old one, so several processes sharing one client's stored
+    credentials (parallel sessions of the same CLI) race each other, and each
+    loser is forced back through the browser login. The FastMCP token is only
+    a reference: the upstream Redmine token is still validated on every
+    request and refreshed server-side when it expires, so revoking the grant
+    in Redmine still takes effect immediately.
+
+    A value that is not a non-negative integer raises at startup rather than
+    silently falling back, since the fallback would bring the re-auth churn
+    back without any sign of why.
+    """
+    raw = os.getenv("REDMINE_MCP_ACCESS_TOKEN_EXPIRY_SECONDS")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        seconds = int(raw.strip())
+        if seconds < 0:
+            raise ValueError(raw)
+    except ValueError:
+        raise RuntimeError(
+            "REDMINE_MCP_ACCESS_TOKEN_EXPIRY_SECONDS must be a non-negative "
+            f"integer number of seconds, got {raw!r}. Unset it or use 0 to "
+            "mirror Redmine's expires_in."
+        ) from None
+    return seconds or None
 
 
 def get_allowed_client_redirect_uris() -> list[str] | None:

@@ -44,6 +44,57 @@ def test_build_oauth_proxy_restricts_redirect_uris_to_loopback_by_default(
     ]
 
 
+def _set_proxy_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("REDMINE_URL", "https://redmine.example")
+    monkeypatch.setenv("REDMINE_MCP_BASE_URL", "https://mcp.example")
+    monkeypatch.setenv("REDMINE_INTROSPECT_CLIENT_ID", "introspect-client")
+    monkeypatch.setenv("REDMINE_INTROSPECT_CLIENT_SECRET", "introspect-secret")
+    monkeypatch.setenv("REDMINE_MCP_JWT_SIGNING_KEY", "stable-test-signing-key")
+    monkeypatch.setattr(settings, "home", tmp_path)
+
+
+def test_build_oauth_proxy_mirrors_upstream_token_expiry_by_default(
+    monkeypatch, tmp_path
+):
+    _set_proxy_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("REDMINE_MCP_ACCESS_TOKEN_EXPIRY_SECONDS", raising=False)
+
+    proxy = build_oauth_proxy()
+
+    assert proxy._fastmcp_access_token_expiry_seconds is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("604800", 604800),
+        (" 86400 ", 86400),
+        ("0", None),
+        ("", None),
+    ],
+)
+def test_build_oauth_proxy_applies_access_token_expiry(
+    monkeypatch, tmp_path, raw, expected
+):
+    _set_proxy_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("REDMINE_MCP_ACCESS_TOKEN_EXPIRY_SECONDS", raw)
+
+    proxy = build_oauth_proxy()
+
+    assert proxy._fastmcp_access_token_expiry_seconds == expected
+
+
+@pytest.mark.parametrize("raw", ["7d", "-5"])
+def test_build_oauth_proxy_rejects_invalid_access_token_expiry(
+    monkeypatch, tmp_path, raw
+):
+    _set_proxy_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("REDMINE_MCP_ACCESS_TOKEN_EXPIRY_SECONDS", raw)
+
+    with pytest.raises(RuntimeError, match="REDMINE_MCP_ACCESS_TOKEN_EXPIRY_SECONDS"):
+        build_oauth_proxy()
+
+
 @pytest.mark.asyncio
 async def test_authenticated_app_mounts_oauth_proxy_under_mcp(monkeypatch, tmp_path):
     monkeypatch.setenv("REDMINE_URL", "https://redmine.example")
@@ -137,3 +188,74 @@ async def test_authenticated_app_derives_mount_prefix_from_base_url(
         "/.well-known/oauth-protected-resource/api/mcp"
         in mcp_post.headers["www-authenticate"]
     )
+
+
+class TestStorePathLogging:
+    """The resolved OAuthProxy store path is discoverable from the log.
+
+    Regression cover for #266: the store defaults into the container
+    filesystem when FASTMCP_HOME is unset, and the only symptom is that
+    users reauthorize after a rebuild. Logging the resolved path once at
+    startup makes that answerable from the log.
+    """
+
+    def test_store_path_resolves_below_fastmcp_home(self, monkeypatch, tmp_path):
+        from redmine_mcp_server._oauth_proxy import oauth_proxy_store_path
+
+        monkeypatch.setattr(settings, "home", tmp_path)
+
+        assert oauth_proxy_store_path() == tmp_path / "oauth-proxy"
+
+    def test_store_path_follows_fastmcp_home_changes(self, monkeypatch, tmp_path):
+        """Resolved at call time, not import time, so the env var wins."""
+        from redmine_mcp_server._oauth_proxy import oauth_proxy_store_path
+
+        monkeypatch.setattr(settings, "home", tmp_path / "first")
+        assert oauth_proxy_store_path().parent == tmp_path / "first"
+
+        monkeypatch.setattr(settings, "home", tmp_path / "second")
+        assert oauth_proxy_store_path().parent == tmp_path / "second"
+
+    def test_logs_store_path_in_oauth_proxy_mode(self, monkeypatch, tmp_path, caplog):
+        from redmine_mcp_server._oauth_proxy import log_oauth_proxy_store_path
+
+        monkeypatch.setattr(settings, "home", tmp_path)
+
+        with caplog.at_level("INFO"):
+            log_oauth_proxy_store_path("oauth-proxy")
+
+        assert str(tmp_path / "oauth-proxy") in caplog.text
+
+    def test_warns_when_fastmcp_home_is_unset(self, monkeypatch, tmp_path, caplog):
+        """An unset FASTMCP_HOME is the rebuild-loses-state case."""
+        from redmine_mcp_server._oauth_proxy import log_oauth_proxy_store_path
+
+        monkeypatch.delenv("FASTMCP_HOME", raising=False)
+        monkeypatch.setattr(settings, "home", tmp_path)
+
+        with caplog.at_level("INFO"):
+            log_oauth_proxy_store_path("oauth-proxy")
+
+        assert "FASTMCP_HOME" in caplog.text
+
+    def test_no_warning_when_fastmcp_home_is_set(self, monkeypatch, tmp_path, caplog):
+        from redmine_mcp_server._oauth_proxy import log_oauth_proxy_store_path
+
+        monkeypatch.setenv("FASTMCP_HOME", str(tmp_path))
+        monkeypatch.setattr(settings, "home", tmp_path)
+
+        with caplog.at_level("INFO"):
+            log_oauth_proxy_store_path("oauth-proxy")
+
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_silent_in_other_auth_modes(self, monkeypatch, tmp_path, caplog):
+        from redmine_mcp_server._oauth_proxy import log_oauth_proxy_store_path
+
+        monkeypatch.setattr(settings, "home", tmp_path)
+
+        with caplog.at_level("INFO"):
+            log_oauth_proxy_store_path("legacy")
+            log_oauth_proxy_store_path("oauth")
+
+        assert caplog.text == ""

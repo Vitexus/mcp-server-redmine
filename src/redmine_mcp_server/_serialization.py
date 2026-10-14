@@ -3,7 +3,7 @@
 import os
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 # Default cap on list_* tool results. Unbounded iteration over resource
@@ -15,6 +15,9 @@ _DEFAULT_LIST_RESULT_CAP = 500
 # Tools that issue a single HTTP call (no pagination loop) cannot exceed
 # this regardless of what the caller asks for.
 _REDMINE_API_PAGE_CAP = 100
+
+# Redmine's own relation keys, from app/views/issues/index.api.rsb.
+_ISSUE_RELATION_FIELDS = ("id", "issue_id", "issue_to_id", "relation_type", "delay")
 
 
 def wrap_insecure_content(content: Any) -> Any:
@@ -37,6 +40,32 @@ def wrap_insecure_content(content: Any) -> Any:
     return (
         f"<insecure-content-{boundary}>\n{content}\n" f"</insecure-content-{boundary}>"
     )
+
+
+def _payload_attr(
+    resource: Any, name: str, convert: Optional[Callable[[Any], Any]] = None
+) -> Any:
+    """Read an attribute the Redmine payload may not have carried.
+
+    A missing attribute and a JSON null both answer ``None`` -- "not readable
+    on this token", never "false" or "empty". python-redmine raises
+    ``ResourceAttrError`` (an ``AttributeError`` subclass) for an attribute
+    absent from the response, which the three-argument ``getattr`` turns into
+    the default; a client configured with ``raise_attr_exception=False``
+    returns ``None`` directly. Both land here as ``None``, which is the honest
+    answer either way.
+
+    ``convert`` runs **only** on a value the payload really carried, so a
+    ``bool`` or list coercion can never manufacture ``False`` or ``[]`` for a
+    key Redmine never sent. That is the whole point: a plausible default is
+    indistinguishable from a real answer, so it must not be reachable.
+
+    Note this reads through ``Resource.__getattr__``, which for a name in the
+    resource's ``_includes`` or ``_relations`` will issue a second request
+    rather than report absence -- see :func:`_included_list` for that case.
+    """
+    value = getattr(resource, name, None)
+    return value if value is None or convert is None else convert(value)
 
 
 def _rewrite_to_public_url(url: Any) -> Any:
@@ -128,6 +157,201 @@ def _iter_capped(resources: Any, cap: int = _DEFAULT_LIST_RESULT_CAP) -> List[An
     return out
 
 
+def _payload_int(value: Any, *, minimum: int) -> Optional[int]:
+    """An integer read out of a Redmine response envelope, or ``None``.
+
+    ``bool`` is an ``int`` subclass, so it is excluded explicitly rather than
+    counted as a number. A value below ``minimum`` is refused the same way an
+    absent one is: a negative offset, or a page size of zero, describes no
+    window, and carrying it into the envelope would state a number Redmine
+    never meant.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        return None
+    return value
+
+
+def _pagination_info(
+    *, limit: int, offset: int, count: int, total: Optional[int] = None
+) -> Dict[str, Any]:
+    """The ``pagination`` block a paginated tool returns.
+
+    The key set is the one ``list_redmine_issues`` returns, so a caller reads
+    every tool offering ``include_pagination_info`` the same way.
+
+    ``total`` is the size of the collection being paged. Pass ``None`` when
+    nothing measured it, or when the number Redmine reported measures some
+    other collection -- an unreported total is never dressed up as a number.
+
+    ``has_next`` prefers measurement over inference. Given a total, the page
+    covers rows ``[offset, offset + limit)``, so a further page exists exactly
+    when ``offset + limit`` is below the total; the inference the issue tools
+    use instead reports one more page than there is whenever the collection
+    size is an exact multiple of the page size. Without a total it falls back
+    to that inference rather than to ``None``: ``None`` is falsy, so a caller
+    testing ``has_next`` would read a full page as the last one and stop
+    mid-collection, whereas the inference is only ever optimistic and costs
+    one wasted request at worst.
+    """
+    if total is None:
+        has_next = count >= limit
+    else:
+        has_next = offset + limit < total
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "count": count,
+        "has_next": has_next,
+        "has_previous": offset > 0,
+        "next_offset": offset + limit if has_next else None,
+        "previous_offset": max(0, offset - limit) if offset > 0 else None,
+    }
+
+
+def _normalize_csv_list(value: Any) -> List[str]:
+    """Coerce a comma-separated string, list, tuple or scalar to a str list.
+
+    ``None`` yields an empty list; names are stripped and blanks dropped.
+    Redmine's query parameters that accept several values (``include``,
+    ``tag_list``) all take either form, so callers normalize before editing
+    one -- ``str()`` on a list would put a Python repr on the wire.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts: Any = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = value
+    else:
+        parts = [value]
+    return [name for name in (str(part).strip() for part in parts) if name]
+
+
+def _included_list(resource: Any, key: str) -> List[Any]:
+    """Read an ``include=`` collection from the payload Redmine already sent.
+
+    Use this instead of ``getattr(resource, key)`` for any name python-redmine
+    treats as a relation. ``BaseResource.__getattr__`` tests ``_relations``
+    before ``_includes``, and ``Issue`` lists ``relations`` in both, so the
+    attribute ignores an ``include=relations`` payload and hands back a lazy
+    resource set that fetches ``GET /issues/{id}/relations.json`` the moment it
+    is iterated. Redmine maps that endpoint to ``manage_issue_relations``,
+    which reading the issue does not imply, so the attribute turns an
+    already-satisfied request into an extra round trip that can also be denied.
+
+    ``raw()`` is python-redmine's accessor for the decoded payload. A key that
+    was never included reads as ``None`` there and is reported as empty, so
+    callers must have asked Redmine for the include -- this never fetches, and
+    cannot tell "no relations" from "never requested".
+    """
+    payload = resource.raw()
+    value = payload.get(key) if isinstance(payload, dict) else None
+    return list(value) if isinstance(value, list) else []
+
+
+def _included_resources(resource: Any, key: str) -> List[Any]:
+    """:func:`_included_list`, for callers that read resources, not dicts.
+
+    The payload decides whether the key is present; only then is the
+    attribute read, which python-redmine encodes from that payload without a
+    request. Read first, the attribute of an ``_includes`` name re-fetches the
+    whole resource with ``include=<key>`` when the key is missing, and Redmine
+    omits some on purpose: an issue's ``children`` when it is a leaf, and
+    ``watchers`` without ``view_issue_watchers``. Not for
+    ``relations``, whose attribute ignores the payload altogether.
+    """
+    if not _included_list(resource, key):
+        return []
+    return list(getattr(resource, key))
+
+
+def _issue_relation_to_dict(relation: Any) -> Dict[str, Any]:
+    """Convert an issue relation to a serializable dict.
+
+    Accepts either a payload dict from ``_included_list`` or a python-redmine
+    ``IssueRelation`` from ``issue_relation.filter``.
+    """
+    if isinstance(relation, dict):
+        return {key: relation.get(key) for key in _ISSUE_RELATION_FIELDS}
+    return {key: getattr(relation, key, None) for key in _ISSUE_RELATION_FIELDS}
+
+
+def _issue_relations_to_list(issue: Any) -> List[Dict[str, Any]]:
+    """Serialize an issue's relations from its ``include=relations`` payload.
+
+    Never fetches; see ``_included_list``.
+    """
+    return [_issue_relation_to_dict(rel) for rel in _included_list(issue, "relations")]
+
+
+def _normalize_tag_list(value: Any) -> List[str]:
+    """Coerce a caller-supplied ``tag_list`` into a list of tag-name strings.
+
+    Accepts a list/tuple of names, a single comma-separated string, or
+    ``None`` (which clears all tags). Names are stripped and blanks dropped.
+    A comma-separated string is split into multiple tags, mirroring the
+    additional_tags plugin's own delimiter; Redmine's ``Array(tag_list)``
+    would otherwise treat ``"a,b"`` as one tag named ``"a,b"``.
+    """
+    return _normalize_csv_list(value)
+
+
+def _custom_fields_to_list(resource: Any) -> List[Dict[str, Any]]:
+    """Convert a resource's ``custom_fields`` to a serializable list.
+
+    Accepts either a python-redmine resource or a decoded payload mapping.
+    Redmine renders custom field values with the same
+    ``render_api_custom_values`` helper on every resource that has them, and has
+    already limited them to the values the caller may see, so one converter
+    serves the issue and contact serializers. The tools that reach a
+    plugin endpoint through ``engine.request`` hold the decoded JSON rather than
+    a resource, which is why a dict is read with ``get`` -- ``getattr`` on a
+    dict would silently report no custom fields at all, the same reason
+    ``_named_ref`` branches on the type.
+    """
+    if isinstance(resource, dict):
+        raw_custom_fields = resource.get("custom_fields")
+    else:
+        raw_custom_fields = getattr(resource, "custom_fields", None)
+    # A decoded payload can carry a scalar here where a resource never
+    # could. Iterating a string would emit one empty entry per character.
+    if raw_custom_fields is None or isinstance(raw_custom_fields, (str, bytes)):
+        return []
+
+    custom_fields: List[Dict[str, Any]] = []
+    try:
+        iterator = iter(raw_custom_fields)
+    except TypeError:
+        return []
+
+    for custom_field in iterator:
+        if isinstance(custom_field, dict):
+            field_id = custom_field.get("id")
+            field_name = custom_field.get("name")
+            field_value = custom_field.get("value")
+        elif custom_field is None or isinstance(
+            custom_field, (str, bytes, int, float, bool)
+        ):
+            # Not a custom field at all; a placeholder of all-None keys would
+            # claim the payload held one.
+            continue
+        else:
+            field_id = getattr(custom_field, "id", None)
+            field_name = getattr(custom_field, "name", None)
+            field_value = getattr(custom_field, "value", None)
+
+        custom_fields.append(
+            {
+                "id": field_id,
+                "name": field_name,
+                "value": _coerce_json_safe(field_value),
+            }
+        )
+
+    return custom_fields
+
+
 def _attachment_to_dict(attachment: Any) -> Dict[str, Any]:
     """Serialize a Redmine attachment object to a stable dict.
 
@@ -164,6 +388,32 @@ def _attachment_to_dict(attachment: Any) -> Dict[str, Any]:
     }
 
 
+def _enabled_module_names(project: Any) -> List[str]:
+    """Module names enabled on a project, from an ``include=enabled_modules`` read.
+
+    python-redmine's ``Project.encode()`` turns them into a plain list of
+    strings, but older versions and raw HTTP responses hand back dicts or
+    resource-like objects, so all three shapes are read.
+    """
+    raw = getattr(project, "enabled_modules", None) or []
+    try:
+        iterator = iter(raw)
+    except TypeError:
+        return []
+
+    names: List[str] = []
+    for mod in iterator:
+        if isinstance(mod, str):
+            name = mod
+        elif isinstance(mod, dict):
+            name = mod.get("name")
+        else:
+            name = getattr(mod, "name", None)
+        if name:
+            names.append(str(name))
+    return names
+
+
 def _named_ref(obj: Any) -> Optional[Dict[str, Any]]:
     """Serialize a Redmine object with `id` + `name` to a dict.
 
@@ -180,14 +430,66 @@ def _named_ref(obj: Any) -> Optional[Dict[str, Any]]:
 
     See issue #109 for the policy decision.
 
+    Refs arrive as plain dicts when python-redmine does not list the
+    key in the parent's ``_resource_map`` -- as with ``project`` on a
+    wiki page, added by Redmine 7.0 (Redmine #43569). ``getattr`` on a
+    dict would silently return ``{'id': None, 'name': ''}``, so dicts
+    are read with ``.get()``.
+
     Returns ``None`` when ``obj`` is ``None``.
     """
     if obj is None:
         return None
+    if isinstance(obj, dict):
+        return {
+            "id": obj.get("id"),
+            "name": obj.get("name", ""),
+        }
     return {
         "id": getattr(obj, "id", None),
         "name": getattr(obj, "name", ""),
     }
+
+
+def _membership_roles_to_list(raw_roles: Any) -> List[Dict[str, Any]]:
+    """Serialize the ``roles`` array of one membership, keeping ``inherited``.
+
+    Redmine renders each role as ``{id, name}`` and merges ``inherited =>
+    true`` onto it when its member role has an ``inherited_from`` -- a role
+    that comes from a group the user belongs to, or from the parent of a
+    subproject that inherits members. ``app/views/members/index.api.rsb``,
+    ``members/show.api.rsb`` and ``users/show.api.rsb`` all carry that line.
+    Redmine omits the key otherwise, so it is mirrored only when present --
+    a hard-coded ``inherited: false`` would be a claim Redmine never made,
+    and it is the one field that tells "holds Manager here" apart from "a
+    group or the parent project does".
+
+    Takes payload dicts (a user's ``include=memberships``) and python-redmine
+    ``Role`` resources (``ProjectMembership.roles``). A resource is read
+    through ``raw()``, python-redmine's accessor for the decoded payload, so
+    a key Redmine did not send reads as absent rather than as a default.
+    """
+    if raw_roles is None or isinstance(raw_roles, (str, bytes, dict)):
+        return []
+    try:
+        items = list(raw_roles)
+    except TypeError:
+        return []
+
+    roles: List[Dict[str, Any]] = []
+    for role in items:
+        entry = _named_ref(role)
+        if entry is None:
+            continue
+        if isinstance(role, dict):
+            payload: Any = role
+        else:
+            raw = getattr(role, "raw", None)
+            payload = raw() if callable(raw) else None
+        if isinstance(payload, dict) and "inherited" in payload:
+            entry["inherited"] = payload["inherited"]
+        roles.append(entry)
+    return roles
 
 
 def _safe_isoformat(val: Any) -> Optional[str]:
@@ -204,6 +506,27 @@ def _safe_isoformat(val: Any) -> Optional[str]:
     if isinstance(val, str):
         return val
     return val.isoformat()
+
+
+def _deal_note_to_dict(note: Any) -> Dict[str, Any]:
+    """Serialize one CRM note, keyed as the plugin's show.api.rsb renders it.
+
+    ``content`` is free text and is wrapped in ``<insecure-content>``
+    boundary tags, matching how issue ``description`` and journal notes are
+    treated. The plugin only renders the notes array for a caller who may
+    see its parent: ``view_deals`` on a deal, ``view_contacts`` on a contact,
+    whose ``include=notes`` entries have the same keys.
+    """
+    if not isinstance(note, dict):
+        return {}
+    return {
+        "id": note.get("id"),
+        "content": wrap_insecure_content(note.get("content", "")),
+        "type_id": note.get("type_id"),
+        "author": _named_ref(note.get("author")),
+        "created_on": _safe_isoformat(note.get("created_on")),
+        "updated_on": _safe_isoformat(note.get("updated_on")),
+    }
 
 
 def _coerce_json_safe(value: Any) -> Any:

@@ -5,7 +5,6 @@ from typing import Annotated, Any, Dict, List, Optional
 from pydantic import Field
 from redminelib.exceptions import VersionMismatchError
 
-from .._annotations import READ_ONLY_ANNOTATIONS
 from .._cleanup import _ensure_cleanup_started
 from .._client import _get_redmine_client
 from .._errors import _handle_redmine_error
@@ -93,10 +92,7 @@ def _resource_to_dict(resource: Any, resource_type: str) -> Dict[str, Any]:
     return base_dict
 
 
-@mcp.tool(
-    title="Search Entire Redmine",
-    annotations=READ_ONLY_ANNOTATIONS,
-)
+@mcp.tool()
 async def search_entire_redmine(
     query: str,
     resources: Optional[List[str]] = None,

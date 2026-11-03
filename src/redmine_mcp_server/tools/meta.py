@@ -25,7 +25,6 @@ string and current-user identity are unambiguously safe.
 import logging
 from typing import Any, Dict, Optional
 
-from .._annotations import READ_ONLY_ANNOTATIONS
 from .. import __version__
 from .._env import SERVER_INFO_PLUGIN_FLAGS, _is_read_only_mode
 from .._extension_registry import REGISTERED_EXTENSIONS
@@ -83,10 +82,7 @@ async def _fetch_current_user_info() -> Optional[Dict[str, Any]]:
         return None
 
 
-@mcp.tool(
-    title="Get MCP Server Info",
-    annotations=READ_ONLY_ANNOTATIONS,
-)
+@mcp.tool()
 async def get_mcp_server_info() -> Dict[str, Any]:
     """Return the MCP server's version, enabled-feature flags, and current user.
 

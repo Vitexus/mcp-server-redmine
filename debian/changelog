@@ -1,3 +1,11 @@
+mcp-server-redmine (2.18.1-2) unstable; urgency=medium
+
+  * Stop bundling pydantic stack: depend on system python3-pydantic (>=
+    2.12) and python3-fastmcp (>= 4.1.4); build no longer downloads from
+    PyPI; package is now Architecture: all.
+
+ -- Vítězslav Dvořák <info@vitexsoftware.cz>  Wed, 04 Nov 2026 00:08:22 +0100
+
 mcp-server-redmine (2.18.1-1) unstable; urgency=high
 
   * New upstream version 2.18.1

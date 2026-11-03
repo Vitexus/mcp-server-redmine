@@ -2,70 +2,17 @@
 
 export PYBUILD_NAME=redmine-mcp-server
 
-# Bundle the complete pydantic stack privately under /usr/lib/redmine-mcp-server/
-# so any system pydantic/pydantic-core version is bypassed entirely.
-# The launcher sets PYTHONPATH to prepend this directory — no system packages
-# are modified or overwritten.
-#
-# Version pinning: pydantic 2.13.X always requires pydantic-core 2.46.X exactly
-# (patch versions match 1:1).  We ship the highest 2.13.x available.
-PYDANTIC_VER        := 2.13.4
-PYDANTIC_CORE_VER   := 2.46.4
-TYPING_EXT_VER      := 4.16.0
-TYPING_INSP_VER     := 0.4.2
-ANNOTATED_TYPES_VER := 0.7.0
-
-BUNDLE_DIR := debian/mcp-server-redmine/usr/lib/redmine-mcp-server
-TMPBASE    := /tmp/rms-bundle
+# All Python dependencies (including pydantic / pydantic-core) come from
+# Debian packages. Nothing is downloaded from PyPI or bundled at build time.
+# The pybuild-generated entry points (mcp-server-redmine, redmine-mcp-server)
+# are installed as-is.
 
 %:
 	dh $@ --with python3 --buildsystem=pybuild
 
+override_dh_auto_install:
+	# Two binary packages: install the Python code into the main one
+	dh_auto_install --destdir=debian/mcp-server-redmine
+
 override_dh_auto_test:
 	# Skip tests - test dependencies not packaged
-
-override_dh_auto_install:
-	dh_auto_install --destdir=debian/mcp-server-redmine
-	install -d $(BUNDLE_DIR)
-	# pydantic-core (Rust .so — architecture-specific)
-	pip3 download --no-deps "pydantic-core==$(PYDANTIC_CORE_VER)" \
-		-d $(TMPBASE)/pydantic-core
-	python3 -m zipfile -e \
-		$$(ls $(TMPBASE)/pydantic-core/pydantic_core-$(PYDANTIC_CORE_VER)-*.whl | head -1) \
-		$(TMPBASE)/pydantic-core-src/
-	cp -r $(TMPBASE)/pydantic-core-src/pydantic_core $(BUNDLE_DIR)/
-	# pydantic (pure Python)
-	pip3 download --no-deps "pydantic==$(PYDANTIC_VER)" \
-		-d $(TMPBASE)/pydantic
-	python3 -m zipfile -e \
-		$$(ls $(TMPBASE)/pydantic/pydantic-$(PYDANTIC_VER)-*.whl | head -1) \
-		$(TMPBASE)/pydantic-src/
-	cp -r $(TMPBASE)/pydantic-src/pydantic $(BUNDLE_DIR)/
-	# typing-extensions (pure Python — single file)
-	pip3 download --no-deps "typing-extensions==$(TYPING_EXT_VER)" \
-		-d $(TMPBASE)/typing-ext
-	python3 -m zipfile -e \
-		$$(ls $(TMPBASE)/typing-ext/typing_extensions-$(TYPING_EXT_VER)-*.whl | head -1) \
-		$(TMPBASE)/typing-ext-src/
-	cp $(TMPBASE)/typing-ext-src/typing_extensions.py $(BUNDLE_DIR)/
-	# typing-inspection (pure Python)
-	pip3 download --no-deps "typing-inspection==$(TYPING_INSP_VER)" \
-		-d $(TMPBASE)/typing-insp
-	python3 -m zipfile -e \
-		$$(ls $(TMPBASE)/typing-insp/typing_inspection-$(TYPING_INSP_VER)-*.whl | head -1) \
-		$(TMPBASE)/typing-insp-src/
-	cp -r $(TMPBASE)/typing-insp-src/typing_inspection $(BUNDLE_DIR)/
-	# annotated-types (pure Python)
-	pip3 download --no-deps "annotated-types==$(ANNOTATED_TYPES_VER)" \
-		-d $(TMPBASE)/annotated-types
-	python3 -m zipfile -e \
-		$$(ls $(TMPBASE)/annotated-types/annotated_types-$(ANNOTATED_TYPES_VER)-*.whl | head -1) \
-		$(TMPBASE)/annotated-types-src/
-	cp -r $(TMPBASE)/annotated-types-src/annotated_types $(BUNDLE_DIR)/
-	# Replace pybuild-generated launcher with PYTHONPATH wrapper
-	install -m 755 debian/mcp-server-redmine.launcher \
-		debian/mcp-server-redmine/usr/bin/redmine-mcp-server
-
-override_dh_auto_clean:
-	dh_auto_clean
-	rm -rf $(TMPBASE) || true

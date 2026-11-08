@@ -7,3 +7,7 @@
 #
 #Tests: testcode.sh
 #Restrictions: allow-stderr, breaks-testbed, needs-internet, needs-root
+
+Tests: smoke
+Depends: @, mcprack (>= 1.6.0)
+Restrictions: allow-stderr
